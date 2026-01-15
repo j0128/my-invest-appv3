@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 12.0: 戰略執行版", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 12.1: 凱利修復版", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -188,42 +188,18 @@ def calc_six_dim_state(series):
     if p < lw: return "L2 超賣區"
     return "L1 震盪整理"
 
-# [NEW] CFO 決策邏輯升級版 (Logic V2)
 def get_cfo_directive_v2(p_now, six_state, trend_status, range_high, range_low, mvrv_z):
-    # 1. 優先級：賣出/止損 (High Priority)
-    if "L" in six_state and "空頭" in trend_status:
-        return "⬛ 止損/清倉 (趨勢損毀)"
-    if range_high > 0 and p_now >= range_high:
-        return "🟥 賣出 50% (達預測高點)"
-    if "H3" in six_state:
-        return "🟥 賣出 50% (極限噴出)"
-    if "H2" in six_state:
-        return "🟧 賣出 1/3 (過熱)"
+    if "L" in six_state and "空頭" in trend_status: return "⬛ 止損/清倉"
+    if range_high > 0 and p_now >= range_high: return "🟥 賣出 50% (達高點)"
+    if "H3" in six_state: return "🟥 賣出 50% (極限)"
+    if "H2" in six_state: return "🟧 賣出 1/3 (過熱)"
 
-    # 2. 買進訊號 (Accumulate) - 可同時存在
     buy_signals = []
+    if (mvrv_z is not None and mvrv_z < -0.5) or (range_low > 0 and p_now < range_low): buy_signals.append("🔵 價值買點")
+    if "L2" in six_state: buy_signals.append("💎 抄底機會")
+    if "多頭" in trend_status and ("H1" in six_state or "L1" in six_state): buy_signals.append("🟢 順勢建倉")
     
-    # A. 價值買點 (Strategic)
-    # 條件: MVRV < -0.5 (相對低估) 或 跌破預測地板
-    is_undervalued = (mvrv_z is not None and mvrv_z < -0.5)
-    is_below_floor = (range_low > 0 and p_now < range_low)
-    if is_undervalued or is_below_floor:
-        buy_signals.append("🔵 價值買點")
-        
-    # B. 抄底機會 (Left-Side)
-    # 條件: L2 超賣
-    if "L2" in six_state:
-        buy_signals.append("💎 抄底機會")
-        
-    # C. 順勢建倉 (Right-Side)
-    # 條件: 多頭趨勢 且 處於健康狀態(H1/L1) - 即未過熱
-    if "多頭" in trend_status and ("H1" in six_state or "L1" in six_state):
-        buy_signals.append("🟢 順勢建倉")
-        
-    if buy_signals:
-        return " | ".join(buy_signals)
-        
-    return "⬜ 觀望/持有"
+    return " | ".join(buy_signals) if buy_signals else "⬜ 觀望/持有"
 
 def analyze_trend_multi(series):
     if series is None or len(series) < 126: return {}
@@ -236,21 +212,43 @@ def analyze_trend_multi(series):
     if p_now < sma200 and p_now > sma200 * 0.9: status = "📉 弱勢"
     return {"p_1m": model.predict([[len(y)+22]])[0].item(), "p_now": p_now, "status": status}
 
+# [FIX] 動態凱利公式修復 (Dynamic Kelly Fix)
 def calc_dynamic_kelly(series, lookback=63):
-    if len(series) < lookback: return 0.0
-    recent = series.iloc[-lookback:]
-    rets = recent.pct_change().dropna()
-    if len(rets) < 10: return 0.0
-    wins = rets[rets > 0]
-    losses = rets[rets < 0]
-    if len(losses) == 0: return 1.0 
-    if len(wins) == 0: return 0.0
-    win_rate = len(wins) / len(rets)
-    avg_win = wins.mean(); avg_loss = abs(losses.mean())
-    if avg_loss == 0: return 1.0
-    wl_ratio = avg_win / avg_loss
-    kelly = win_rate - ((1 - win_rate) / wl_ratio)
-    return max(0.0, min(1.0, kelly * 0.5))
+    try:
+        if len(series) < lookback: return 0.0
+        
+        # 取最近 N 天數據
+        recent = series.iloc[-lookback:]
+        rets = recent.pct_change().dropna()
+        
+        if len(rets) < 10: return 0.0
+        
+        # 分離勝負
+        wins = rets[rets > 0]
+        losses = rets[rets < 0]
+        
+        # 極端狀況處理
+        if len(losses) == 0: return 1.0 # 沒輸過
+        if len(wins) == 0: return 0.0   # 沒贏過
+        
+        win_rate = len(wins) / len(rets)
+        avg_win = wins.mean()
+        avg_loss = abs(losses.mean())
+        
+        if avg_loss == 0: return 1.0
+        
+        # 盈虧比
+        wl_ratio = avg_win / avg_loss
+        
+        # 凱利公式: f* = W - (1-W)/R
+        kelly = win_rate - ((1 - win_rate) / wl_ratio)
+        
+        # 安全處理 (Half-Kelly, 且不小於0)
+        kelly_safe = max(0.0, min(1.0, kelly * 0.5))
+        
+        return kelly_safe
+    except:
+        return 0.0
 
 def calc_obv(close, volume):
     if volume is None: return None
@@ -314,11 +312,11 @@ def main():
         tickers_list = list(portfolio_dict.keys())
         total_value = sum(portfolio_dict.values())
         st.metric("總資產 (Est.)", f"${total_value:,.0f}")
-        if st.button("🚀 啟動戰略執行", type="primary"): st.session_state['run'] = True
+        if st.button("🚀 啟動修復版", type="primary"): st.session_state['run'] = True
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 12.0 正在擬定多空戰略..."):
+    with st.spinner("🦅 Alpha 12.1 正在修復凱利參數..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
         df_macro = fetch_fred_macro(fred_key)
         adv_data = {t: get_advanced_info(t) for t in tickers_list}
@@ -344,7 +342,7 @@ def main():
 
         if df_macro is not None: st.plotly_chart(px.line(df_macro, y='Net_Liquidity', title='聯準會流動性趨勢', height=250), use_container_width=True)
 
-        st.markdown("#### 📊 CFO 戰略指令總表 (買賣雙向)")
+        st.markdown("#### 📊 CFO 戰略指令總表")
         summary = []
         for t in tickers_list:
             if t not in df_close.columns: continue
@@ -353,9 +351,13 @@ def main():
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
             bt = run_backtest_lab(t, df_close, df_high, df_low, 22)
             six_state = calc_six_dim_state(df_close[t])
-            d_kelly = calc_dynamic_kelly(df_close[t], 63)
             
-            # MVRV & Confidence Interval
+            # [FIXED] 確保動態凱利被正確調用並顯示
+            d_kelly = calc_dynamic_kelly(df_close[t], 63)
+            kelly_s = f"{d_kelly*100:.1f}%"
+            if d_kelly == 0: kelly_s = "🛑 0% (觀望)"
+            elif d_kelly > 0.5: kelly_s = f"🔥 {d_kelly*100:.0f}% (重倉)"
+            
             mvrv_s = calc_mvrv_z(df_close[t])
             mvrv_z = mvrv_s.iloc[-1] if mvrv_s is not None else 0
             
@@ -369,14 +371,12 @@ def main():
                 range_high = tgt_val + 2 * price_sigma
                 range_str = f"${range_low:.0f} ~ ${range_high:.0f}"
             
-            # 取得 CFO 綜合指令 (Logic V2)
             cfo_act = get_cfo_directive_v2(trend['p_now'], six_state, trend['status'], range_high, range_low, mvrv_z)
             
             summary.append({
-                "代號": t, 
-                "現價": f"${trend['p_now']:.2f}", 
+                "代號": t, "現價": f"${trend['p_now']:.2f}", 
                 "CFO 指令": cfo_act,
-                "動態 Kelly (3M)": f"{d_kelly*100:.1f}%",
+                "動態 Kelly (3M)": kelly_s,  # 這裡確保有值
                 "預測值 (1M)": f"${tgt_val:.2f}" if tgt_val > 0 else "-",
                 "95% 區間": range_str,
                 "六維狀態": six_state,
@@ -384,7 +384,6 @@ def main():
                 "回測 Bias": f"{bt['Error']:.1%}" if bt else "-"
             })
         st.dataframe(pd.DataFrame(summary), use_container_width=True)
-        st.caption("📝 指令說明：順勢建倉(50%) | 抄底(30%) | 價值買點(DCA) | 賣出獲利 | 趨勢止損。")
         
         st.markdown("---")
         st.subheader("2. 個股戰略雷達")
@@ -395,7 +394,7 @@ def main():
             bt = run_backtest_lab(t, df_close, df_high, df_low, 22)
             obv = calc_obv(df_close[t], df_vol[t])
             mvrv_s = calc_mvrv_z(df_close[t])
-            mvrv_z = mvrv_s.iloc[-1] if mvrv_s is not None else 0
+            mvrv = mvrv_s.iloc[-1] if mvrv_s is not None else 0
             comp_res = compare_with_leverage(t, df_close)
             six_state = calc_six_dim_state(df_close[t])
             d_kelly = calc_dynamic_kelly(df_close[t], 63)
