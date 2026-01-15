@@ -336,7 +336,18 @@ def main():
         inc = st.number_input("月收", 80000); exp = st.number_input("月支", 40000); st.metric("儲蓄率", f"{(inc-exp)/inc:.1%}")
     with t6:
         st.subheader("🏠 房貸目標")
+def calc_mortgage(amt, yrs, rate):
+    # amt: 貸款總額, yrs: 貸款年限, rate: 年利率 (%)
+    r = rate / 100 / 12  # 月利率
+    m = yrs * 12         # 總期數
+    if r > 0:
+        pmt = amt * (r * (1 + r)**m) / ((1 + r)**m - 1)
+    else:
+        pmt = amt / m
+    return pmt, pmt * m - amt
+
         amt = st.number_input("貸", 10000000); rt = st.number_input("率", 2.2); pmt, _ = calc_mortgage(amt, 30, rt); st.metric("月付", f"${pmt:,.0f}")
+
     with t7:
         st.subheader("📊 策略實驗室")
         avail = [c for c in df_close.columns if not (c.startswith('^') or c.endswith('=F'))]
