@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 12.3: 策略實驗室", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 12.4: 實戰策略實驗室", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -253,18 +253,24 @@ def compare_with_leverage(ticker, df_close):
     status = "👑 跑贏 TQQQ" if ret_ticker > ret_tqqq else "💀 輸給 TQQQ"
     return df_norm, status, ret_ticker, ret_tqqq
 
-# [NEW] 策略實驗室回測引擎
-def run_strategy_backtest(df_in, frequency_days=1):
+# [NEW] 實戰回測引擎 (CFO V3 邏輯植入)
+def run_strategy_backtest(df_in, vol_in, frequency_days=1):
     """
     回測邏輯：
     1. 起始資金 10000，每月1號 +10000。
-    2. DCA 組：錢進來直接買。
-    3. 策略組：根據頻率檢測訊號 (CFO V3 邏輯)，決定買賣比例。
-       - 買進：根據 Cash 的 % (20%, 50%, 80%)
-       - 賣出：根據 持倉 的 % (33%, 50%, 100%)
+    2. 鎖定時間視窗：最後 300 個交易日。
+    3. [重要] 完整植入 CFO V3 買賣邏輯。
     """
     df = df_in.copy()
-    # 預先計算指標以加速
+    df['Volume'] = vol_in
+    
+    # 鎖定 300 天
+    if len(df) > 300:
+        df = df.iloc[-300:]
+    elif len(df) < 250:
+        return None, 0, 0, 0, 0, 0
+
+    # 1. 預先計算所有指標 (模擬當時看到的數據)
     df['SMA20'] = df['Close'].rolling(20).mean()
     df['SMA200'] = df['Close'].rolling(200).mean()
     df['STD20'] = df['Close'].rolling(20).std()
@@ -277,8 +283,15 @@ def run_strategy_backtest(df_in, frequency_days=1):
     down = -1 * delta.clip(upper=0)
     df['RSI'] = 100 - (100 / (1 + up.ewm(com=13).mean() / down.ewm(com=13).mean()))
     
-    # Slope
+    # Slope (5日)
     df['Slope'] = (df['SMA20'] - df['SMA20'].shift(5)) / df['SMA20'].shift(5)
+    
+    # Volume Ratio
+    df['Vol_MA'] = df['Volume'].rolling(20).mean()
+    df['Vol_Ratio'] = df['Volume'] / df['Vol_MA']
+
+    # 2. MVRV Z-Score (模擬計算)
+    df['MVRV_Z'] = (df['Close'] - df['SMA200']) / df['Close'].rolling(200).std()
 
     # 初始化
     cash_dca = 0; shares_dca = 0; invested_dca = 0
@@ -287,23 +300,16 @@ def run_strategy_backtest(df_in, frequency_days=1):
     history = []
     last_month = -1
     
-    # 僅跑最後 300 天
-    if len(df) > 300: df = df.iloc[-300:]
-    
     for i in range(len(df)):
         date = df.index[i]
         price = df['Close'].iloc[i]
         
-        # 1. 每月發薪水 (每月第1天或最接近的一天)
+        # --- 每月發薪水 (Inject Capital) ---
         if date.month != last_month:
-            # Inject Capital
-            cash_dca += 10000
-            invested_dca += 10000
+            cash_dca += 10000; invested_dca += 10000
+            cash_strat += 10000; invested_strat += 10000
             
-            cash_strat += 10000
-            invested_strat += 10000
-            
-            # DCA 策略：有錢就買
+            # 對照組 (DCA): 有錢就買
             can_buy = cash_dca // price
             if can_buy > 0:
                 shares_dca += can_buy
@@ -311,17 +317,21 @@ def run_strategy_backtest(df_in, frequency_days=1):
             
             last_month = date.month
         
-        # 2. 策略組交易 (按頻率)
-        if i % frequency_days == 0 and i > 20: # 確保有均線數據
-            # 判斷訊號 (簡化版 V3 邏輯，避免 look-ahead)
+        # --- 策略組 (Strategy Execution) ---
+        if i % frequency_days == 0 and i > 20: 
+            # 讀取當日指標
             p = price; ma20 = df['SMA20'].iloc[i]; upper = df['Upper'].iloc[i]; lower = df['Lower'].iloc[i]
             ma200 = df['SMA200'].iloc[i]; rsi = df['RSI'].iloc[i]; slope = df['Slope'].iloc[i]
+            vol_r = df['Vol_Ratio'].iloc[i]; mvrv_z = df['MVRV_Z'].iloc[i]
             
-            # 賣訊
+            # --- 賣出邏輯 (CFO V3) ---
             sell_pct = 0
-            if p < ma20 and ma200 > 0 and p < ma200: sell_pct = 1.0 # 趨勢損毀
-            elif p > upper * 1.05 or rsi > 80: sell_pct = 0.5 # 極限噴出
-            elif p > upper: sell_pct = 0.33 # 過熱
+            # 1. 止損 (趨勢損毀): 跌破 20MA 且 長期也是空頭
+            if p < ma20 and ma200 > 0 and p < ma200: sell_pct = 1.0 
+            # 2. 避險 (極限): H3 或 RSI > 80
+            elif p > upper * 1.05 or rsi > 80: sell_pct = 0.5 
+            # 3. 減碼 (過熱): H2
+            elif p > upper: sell_pct = 0.33 
             
             if sell_pct > 0 and shares_strat > 0:
                 sell_amt = int(shares_strat * sell_pct)
@@ -329,36 +339,42 @@ def run_strategy_backtest(df_in, frequency_days=1):
                     shares_strat -= sell_amt
                     cash_strat += sell_amt * price
             
-            # 買訊
+            # --- 買入邏輯 (CFO V3) ---
             buy_pct_cash = 0
-            # 抄底
-            if p < lower: buy_pct_cash = 0.3
-            # 順勢
-            elif p > ma20 and p > ma200: # 簡化：多頭
-                if slope > 0.01: buy_pct_cash = 0.8 # 加速
-                elif slope > 0: buy_pct_cash = 0.5 # 確立
-                else: buy_pct_cash = 0.2 # 試單
+            if sell_pct == 0: # 沒賣才考慮買
+                # A. 價值買點 (MVRV < -0.5)
+                if mvrv_z < -0.5: 
+                    buy_pct_cash = max(buy_pct_cash, 0.5) # 價值買點給 50%
+                
+                # B. 抄底機會 (L2)
+                if p < lower: 
+                    buy_pct_cash = max(buy_pct_cash, 0.3) # 抄底給 30%
+                
+                # C. 順勢建倉 (多頭 + 未過熱)
+                if p > ma20 and p > ma200 and p < upper:
+                    if slope > 0.01 and vol_r > 1.5: 
+                        buy_pct_cash = max(buy_pct_cash, 0.8) # 加速進攻 (80%)
+                    elif slope > 0: 
+                        buy_pct_cash = max(buy_pct_cash, 0.5) # 多頭確立 (50%)
+                    else: 
+                        buy_pct_cash = max(buy_pct_cash, 0.2) # 轉強試單 (20%)
             
             if buy_pct_cash > 0 and cash_strat > 0:
                 amount_to_spend = cash_strat * buy_pct_cash
-                can_buy = amount_to_spend // price
-                if can_buy > 0:
-                    shares_strat += can_buy
-                    cash_strat -= can_buy * price
+                # 至少要累積到 $1000 才下單 (模擬手續費效率)
+                if amount_to_spend > 1000:
+                    can_buy = amount_to_spend // price
+                    if can_buy > 0:
+                        shares_strat += can_buy
+                        cash_strat -= can_buy * price
 
         # 記錄淨值
         val_dca = cash_dca + shares_dca * price
         val_strat = cash_strat + shares_strat * price
-        history.append({
-            "Date": date,
-            "DCA_Value": val_dca,
-            "Strat_Value": val_strat,
-            "Invested": invested_strat
-        })
+        history.append({"Date": date, "DCA_Value": val_dca, "Strat_Value": val_strat, "Invested": invested_strat})
         
     res_df = pd.DataFrame(history).set_index("Date")
     
-    # 計算最終指標
     final_dca = res_df['DCA_Value'].iloc[-1]
     final_strat = res_df['Strat_Value'].iloc[-1]
     invested = res_df['Invested'].iloc[-1]
@@ -412,11 +428,11 @@ def main():
         tickers_list = list(portfolio_dict.keys())
         total_value = sum(portfolio_dict.values())
         st.metric("總資產 (Est.)", f"${total_value:,.0f}")
-        if st.button("🚀 啟動實驗室", type="primary"): st.session_state['run'] = True
+        if st.button("🚀 啟動實戰回測", type="primary"): st.session_state['run'] = True
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 12.3 正在進行時空回測..."):
+    with st.spinner("🦅 Alpha 12.4 正在執行全市場掃描..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
         df_macro, df_fed = fetch_fred_macro(fred_key)
         adv_data = {t: get_advanced_info(t) for t in tickers_list}
@@ -531,39 +547,59 @@ def main():
         pmt,_=calc_mortgage(amt,30,rt)
         st.metric("月付", f"${pmt:,.0f}")
 
-    # === TAB 7: 策略實驗室 (NEW) ===
+    # === TAB 7: 實戰策略實驗室 (PRO) ===
     with t7:
-        st.subheader("📈 買入賣出策略實驗室 (Strategy Lab)")
-        st.info("💡 模擬情境：過去300天，初始本金$10,000，每個月1號發薪水再存入$10,000。嚴格執行 CFO V3 策略 vs 無腦定投。")
+        st.subheader("📈 實戰買入賣出實驗室 (Strategy Lab Pro)")
+        st.info("💡 模擬情境：過去300天，初始本金$10,000，每個月1號發薪水再存入$10,000。實驗組將嚴格執行 CFO V3 的所有買賣指令。")
         
-        lab_ticker = st.selectbox("選擇回測標的", tickers_list)
+        # 全市場選單
+        avail_tickers = [c for c in df_close.columns if not (c.startswith('^') or c.endswith('=F'))]
+        benchs = ['SPY', 'QQQ', 'TQQQ', 'TLT']
+        final_list = sorted(list(set(avail_tickers + benchs)))
+        
+        lab_ticker = st.selectbox("選擇回測標的 (包含全市場)", final_list)
         
         if lab_ticker in df_close.columns:
-            # 執行三種頻率的回測
-            res_1d, roi_1d, strat_roi_1d, inv_1d, end_dca, end_1d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=1)
-            res_3d, roi_3d, strat_roi_3d, inv_3d, _, end_3d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=3)
-            res_7d, roi_7d, strat_roi_7d, inv_7d, _, end_7d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=7)
+            # 執行回測 (傳入 Volume 以計算 Vol_Ratio)
+            res_1d, roi_1d, strat_roi_1d, inv_1d, end_dca, end_1d = run_strategy_backtest(
+                df_close[lab_ticker].to_frame(name='Close'), 
+                df_vol[lab_ticker], 
+                frequency_days=1
+            )
+            res_3d, roi_3d, strat_roi_3d, inv_3d, _, end_3d = run_strategy_backtest(
+                df_close[lab_ticker].to_frame(name='Close'), 
+                df_vol[lab_ticker],
+                frequency_days=3
+            )
+            res_7d, roi_7d, strat_roi_7d, inv_7d, _, end_7d = run_strategy_backtest(
+                df_close[lab_ticker].to_frame(name='Close'), 
+                df_vol[lab_ticker],
+                frequency_days=7
+            )
             
-            # 顯示結果 Metrics
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("總投入本金", f"${inv_1d:,.0f}")
-            k2.metric("無腦定投 (DCA) 淨值", f"${end_dca:,.0f}", f"ROI: {roi_1d:.1%}")
-            
-            # 策略比較表
-            strat_data = [
-                {"策略頻率": "每日一次 (Daily)", "最終淨值": f"${end_1d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_1d:.1%}", "本益比 (Profit/Cost)": f"{(end_1d-inv_1d)/inv_1d:.2f}"},
-                {"策略頻率": "每3天一次 (3-Day)", "最終淨值": f"${end_3d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_3d:.1%}", "本益比 (Profit/Cost)": f"{(end_3d-inv_3d)/inv_3d:.2f}"},
-                {"策略頻率": "每週一次 (Weekly)", "最終淨值": f"${end_7d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_7d:.1%}", "本益比 (Profit/Cost)": f"{(end_7d-inv_7d)/inv_7d:.2f}"},
-            ]
-            st.table(pd.DataFrame(strat_data))
-            
-            # 畫圖 (比較 1D 策略 vs DCA)
-            st.markdown("#### 📊 資金曲線對決 (Strategy vs DCA)")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['DCA_Value'], name='無腦定投 (DCA)', line=dict(color='gray', dash='dash')))
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Strat_Value'], name='CFO 策略 (Daily)', line=dict(color='#00BFFF', width=2)))
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Invested'], name='投入本金', line=dict(color='green', width=1)))
-            st.plotly_chart(fig, use_container_width=True)
+            if res_1d is not None:
+                # 顯示結果 Metrics
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("總投入本金", f"${inv_1d:,.0f}")
+                k2.metric("無腦定投 (DCA) 淨值", f"${end_dca:,.0f}", f"ROI: {roi_1d:.1%}")
+                
+                # 策略比較表
+                strat_data = [
+                    {"策略頻率": "每日看盤 (Daily)", "最終淨值": f"${end_1d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_1d:.1%}", "本益比": f"{(end_1d-inv_1d)/inv_1d:.2f}"},
+                    {"策略頻率": "每3天一次 (3-Day)", "最終淨值": f"${end_3d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_3d:.1%}", "本益比": f"{(end_3d-inv_3d)/inv_3d:.2f}"},
+                    {"策略頻率": "每週一次 (Weekly)", "最終淨值": f"${end_7d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_7d:.1%}", "本益比": f"{(end_7d-inv_7d)/inv_7d:.2f}"},
+                ]
+                st.table(pd.DataFrame(strat_data))
+                
+                # 畫圖
+                st.markdown("#### 📊 資金曲線對決 (CFO Strategy vs DCA)")
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['DCA_Value'], name='無腦定投 (DCA)', line=dict(color='gray', dash='dash')))
+                fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Strat_Value'], name='CFO 策略 (Daily)', line=dict(color='#00BFFF', width=2)))
+                fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Invested'], name='投入本金', line=dict(color='green', width=1)))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("數據不足 300 天，無法進行完整回測。")
 
 if __name__ == "__main__":
     main()
