@@ -1,0 +1,9 @@
+streamlit
+yfinance
+pandas
+numpy
+fredapi
+plotly
+scikit-learn
+requests
+xgboost
