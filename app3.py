@@ -309,9 +309,9 @@ def main():
             info = adv_data.get(t, {})
             chip_data.append({
                 "代號": t, 
-                "機構持股": f"{info.get('Inst_Held' or 0)*100:.1f}%", 
-                "內部人": f"{info.get('Insider_Held' or 0)*100:.1f}%", 
-                "空單": f"{info.get('Short_Ratio' or 0):.2f}"
+                "機構持股": f"{(info.get('Inst_Held') or 0)*100:.1f}%", 
+                "內部人": f"{(info.get('Insider_Held') or 0)*100:.1f}%", 
+                "空單": f"{(info.get('Short_Ratio') or 0):.2f}"
             })
         st.dataframe(pd.DataFrame(chip_data), use_container_width=True)
     with t3:
@@ -321,9 +321,9 @@ def main():
             info = adv_data.get(t, {})
             h_data.append({
                 "代號": t, 
-                "PEG": f"{info.get('PEG' or 0):.2f}", 
-                "ROE": f"{info.get('ROE' or 0)*100:.1f}%", 
-                "淨利率": f"{info.get('Profit_Margin' or 0)*100:.1f}%", 
+                "PEG": f"{(info.get('PEG') or 0):.2f}", 
+                "ROE": f"{(info.get('ROE') or 0)*100:.1f}%", 
+                "淨利率": f"{(info.get('Profit_Margin') or 0)*100:.1f}%", 
                 "流動比": info.get('Current_Ratio'), 
                 "負債/權益": info.get('Debt_Equity')})
         st.dataframe(pd.DataFrame(h_data), use_container_width=True)
