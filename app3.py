@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 12.1: 凱利修復版", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 12.2: 戰略指揮官", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -27,7 +27,8 @@ st.markdown("""
 # --- 1. 核心數據引擎 ---
 @st.cache_data(ttl=1800)
 def fetch_market_data(tickers):
-    benchmarks = ['SPY', 'QQQ', 'QLD', 'TQQQ', '^VIX', '^TNX', 'HYG', 'GC=F', 'HG=F', 'DX-Y.NYB'] 
+    # 加入 ^IRX (短債) 作為利率方向參考
+    benchmarks = ['SPY', 'QQQ', 'QLD', 'TQQQ', '^VIX', '^TNX', '^IRX', 'HYG', 'GC=F', 'HG=F', 'DX-Y.NYB'] 
     all_tickers = list(set(tickers + benchmarks))
     data = {col: {} for col in ['Close', 'Open', 'High', 'Low', 'Volume']}
     
@@ -52,13 +53,20 @@ def fetch_fred_macro(api_key):
     if not api_key: return None
     try:
         fred = Fred(api_key=api_key)
+        # 加入 FEDFUNDS (聯邦基金利率)
         walcl = fred.get_series('WALCL', observation_start='2024-01-01')
         tga = fred.get_series('WTREGEN', observation_start='2024-01-01')
         rrp = fred.get_series('RRPONTSYD', observation_start='2024-01-01')
+        fed_rate = fred.get_series('FEDFUNDS', observation_start='2023-01-01')
+        
         df = pd.DataFrame({'WALCL': walcl, 'TGA': tga, 'RRP': rrp}).ffill().dropna()
         df['Net_Liquidity'] = (df['WALCL'] - df['TGA'] - df['RRP']) / 1000 
-        return df
-    except: return None
+        
+        # 處理利率 (月度數據需填滿)
+        df_rate = pd.DataFrame({'Fed_Rate': fed_rate}).resample('D').ffill()
+        
+        return df, df_rate
+    except: return None, None
 
 @st.cache_data(ttl=3600*24)
 def get_advanced_info(ticker):
@@ -94,7 +102,7 @@ def get_advanced_info(ticker):
         }
     except: return {'Type': 'Unknown'}
 
-# --- 2. 戰略運算 ---
+# --- 2. 戰略運算 (AI & Logic) ---
 
 def train_rf_model(df_close, ticker, days_forecast=22):
     try:
@@ -120,29 +128,23 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
     if ticker not in df_close.columns: return None
     c = df_close[ticker]; h = df_high[ticker]; l = df_low[ticker]
     if len(c) < 100: return None
-    
     try:
         tr = pd.concat([h-l, (h-c.shift(1)).abs(), (l-c.shift(1)).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         t_atr = c.iloc[-1] + (atr * np.sqrt(days_forecast))
     except: t_atr = None
-    
     try:
         mu = c.pct_change().mean()
         t_mc = c.iloc[-1] * ((1 + mu)**days_forecast)
     except: t_mc = None
-    
     try:
         recent = c.iloc[-60:]
         t_fib = recent.max() + (recent.max() - recent.min()) * 0.618 
     except: t_fib = None
-    
     t_fund = f_data.get('Target_Mean')
     t_rf = train_rf_model(df_close, ticker, days_forecast)
-    
     targets = [t for t in [t_atr, t_mc, t_fib, t_fund, t_rf] if t is not None and not pd.isna(t)]
     t_avg = sum(targets) / len(targets) if targets else None
-    
     return {"ATR": t_atr, "MC": t_mc, "Fib": t_fib, "Fund": t_fund, "RF": t_rf, "Avg": t_avg}
 
 def run_backtest_lab(ticker, df_close, df_high, df_low, days_ago=22):
@@ -150,17 +152,14 @@ def run_backtest_lab(ticker, df_close, df_high, df_low, days_ago=22):
     idx_past = len(df_close) - days_ago - 1
     p_now = df_close[ticker].iloc[-1]
     df_past = df_close.iloc[:idx_past+1]
-    
     past_rf = train_rf_model(df_past, ticker, days_ago)
     c_slice = df_close[ticker].iloc[:idx_past+1]
     h_slice = df_high[ticker].iloc[:idx_past+1]
     l_slice = df_low[ticker].iloc[:idx_past+1]
-    
     tr = pd.concat([h_slice-l_slice], axis=1).max(axis=1)
     atr = tr.rolling(14).mean().iloc[-1]
     past_atr = c_slice.iloc[-1] + (atr * np.sqrt(days_ago))
     past_mc = c_slice.iloc[-1] * ((1 + c_slice.pct_change().mean())**days_ago)
-    
     valid_past = [x for x in [past_rf, past_atr, past_mc] if x is not None]
     if not valid_past: return None
     past_avg = sum(valid_past) / len(valid_past)
@@ -173,6 +172,29 @@ def calc_mvrv_z(series):
     std200 = series.rolling(200).std()
     return (series - sma200) / std200
 
+# [NEW] 技術指標計算 (RSI, 斜率, 量能)
+def calc_tech_indicators(series, vol_series):
+    if len(series) < 60: return None, None, None
+    
+    # RSI
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    ema_down = down.ewm(com=13, adjust=False).mean()
+    rs = ema_up / ema_down
+    rsi = 100 - (100 / (1 + rs)).iloc[-1]
+    
+    # MA20 Slope (斜率)
+    ma20 = series.rolling(20).mean()
+    slope = (ma20.iloc[-1] - ma20.iloc[-5]) / ma20.iloc[-5] # 5日斜率變化
+    
+    # Volume Ratio
+    vol_ma = vol_series.rolling(20).mean().iloc[-1]
+    vol_ratio = vol_series.iloc[-1] / vol_ma if vol_ma > 0 else 1.0
+    
+    return rsi, slope, vol_ratio
+
 def calc_six_dim_state(series):
     if len(series) < 22: return "N/A"
     p = series.iloc[-1]
@@ -180,7 +202,6 @@ def calc_six_dim_state(series):
     std20 = series.rolling(20).std().iloc[-1]
     up = ma20 + 2 * std20
     lw = ma20 - 2 * std20
-    
     if p > up * 1.05: return "H3 極限噴出"
     if p > up: return "H2 情緒過熱"
     if p > ma20: return "H1 多頭回歸"
@@ -188,17 +209,44 @@ def calc_six_dim_state(series):
     if p < lw: return "L2 超賣區"
     return "L1 震盪整理"
 
-def get_cfo_directive_v2(p_now, six_state, trend_status, range_high, range_low, mvrv_z):
-    if "L" in six_state and "空頭" in trend_status: return "⬛ 止損/清倉"
-    if range_high > 0 and p_now >= range_high: return "🟥 賣出 50% (達高點)"
-    if "H3" in six_state: return "🟥 賣出 50% (極限)"
-    if "H2" in six_state: return "🟧 賣出 1/3 (過熱)"
-
-    buy_signals = []
-    if (mvrv_z is not None and mvrv_z < -0.5) or (range_low > 0 and p_now < range_low): buy_signals.append("🔵 價值買點")
-    if "L2" in six_state: buy_signals.append("💎 抄底機會")
-    if "多頭" in trend_status and ("H1" in six_state or "L1" in six_state): buy_signals.append("🟢 順勢建倉")
+# [NEW] CFO 決策邏輯 V3 (三階梯戰術)
+def get_cfo_directive_v3(p_now, six_state, trend_status, range_high, range_low, mvrv_z, rsi, slope, vol_ratio):
     
+    # 1. 優先級：賣出/止損 (High Priority)
+    # Level 3: 清倉
+    if "L" in six_state and "空頭" in trend_status:
+        return "⬛ 趨勢損毀 (清倉)"
+    
+    # Level 2: 避險/大賣
+    if ("H3" in six_state) or (rsi is not None and rsi > 80):
+        return "🟥 極限噴出 (賣1/2)"
+    if range_high > 0 and p_now >= range_high:
+        return "🟥 達預測高點 (賣1/2)"
+        
+    # Level 1: 減碼
+    if "H2" in six_state:
+        return "🟧 過熱減碼 (賣1/3)"
+
+    # 2. 買進訊號 (Accumulate)
+    buy_signals = []
+    
+    # A. 價值買點
+    if (mvrv_z is not None and mvrv_z < -0.5) or (range_low > 0 and p_now < range_low):
+        buy_signals.append("🔵 價值買點")
+        
+    # B. 抄底機會
+    if "L2" in six_state:
+        buy_signals.append("💎 抄底機會 (30%)")
+        
+    # C. 順勢建倉 (分級)
+    if "多頭" in trend_status and ("H1" in six_state or "L1" in six_state):
+        if slope is not None and slope > 0.01 and vol_ratio > 1.5:
+            buy_signals.append("🔥 加速進攻 (80%)")
+        elif slope is not None and slope > 0:
+            buy_signals.append("🟢 多頭確立 (50%)")
+        else:
+            buy_signals.append("🟢 轉強試單 (20%)")
+        
     return " | ".join(buy_signals) if buy_signals else "⬜ 觀望/持有"
 
 def analyze_trend_multi(series):
@@ -212,43 +260,23 @@ def analyze_trend_multi(series):
     if p_now < sma200 and p_now > sma200 * 0.9: status = "📉 弱勢"
     return {"p_1m": model.predict([[len(y)+22]])[0].item(), "p_now": p_now, "status": status}
 
-# [FIX] 動態凱利公式修復 (Dynamic Kelly Fix)
 def calc_dynamic_kelly(series, lookback=63):
     try:
         if len(series) < lookback: return 0.0
-        
-        # 取最近 N 天數據
         recent = series.iloc[-lookback:]
         rets = recent.pct_change().dropna()
-        
         if len(rets) < 10: return 0.0
-        
-        # 分離勝負
         wins = rets[rets > 0]
         losses = rets[rets < 0]
-        
-        # 極端狀況處理
-        if len(losses) == 0: return 1.0 # 沒輸過
-        if len(wins) == 0: return 0.0   # 沒贏過
-        
+        if len(losses) == 0: return 1.0 
+        if len(wins) == 0: return 0.0
         win_rate = len(wins) / len(rets)
-        avg_win = wins.mean()
-        avg_loss = abs(losses.mean())
-        
+        avg_win = wins.mean(); avg_loss = abs(losses.mean())
         if avg_loss == 0: return 1.0
-        
-        # 盈虧比
         wl_ratio = avg_win / avg_loss
-        
-        # 凱利公式: f* = W - (1-W)/R
         kelly = win_rate - ((1 - win_rate) / wl_ratio)
-        
-        # 安全處理 (Half-Kelly, 且不小於0)
-        kelly_safe = max(0.0, min(1.0, kelly * 0.5))
-        
-        return kelly_safe
-    except:
-        return 0.0
+        return max(0.0, min(1.0, kelly * 0.5))
+    except: return 0.0
 
 def calc_obv(close, volume):
     if volume is None: return None
@@ -312,13 +340,13 @@ def main():
         tickers_list = list(portfolio_dict.keys())
         total_value = sum(portfolio_dict.values())
         st.metric("總資產 (Est.)", f"${total_value:,.0f}")
-        if st.button("🚀 啟動修復版", type="primary"): st.session_state['run'] = True
+        if st.button("🚀 啟動指揮官", type="primary"): st.session_state['run'] = True
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 12.1 正在修復凱利參數..."):
+    with st.spinner("🦅 Alpha 12.2 正在擬定戰略指令..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
-        df_macro = fetch_fred_macro(fred_key)
+        df_macro, df_fed = fetch_fred_macro(fred_key) # 新增 fed data
         adv_data = {t: get_advanced_info(t) for t in tickers_list}
 
     if df_close.empty: st.error("❌ 無數據"); st.stop()
@@ -327,22 +355,35 @@ def main():
 
     # === TAB 1: 戰略 ===
     with t1:
-        st.subheader("1. 宏觀與總表")
+        st.subheader("1. 宏觀戰情 (Macro V5)")
         liq = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0
         vix = df_close['^VIX'].iloc[-1] if '^VIX' in df_close.columns else 0
         tnx = df_close['^TNX'].iloc[-1] if '^TNX' in df_close.columns else 0
         try: cg = (df_close['HG=F'].iloc[-1]/df_close['GC=F'].iloc[-1])*1000
         except: cg = 0
         
-        c1, c2, c3, c4 = st.columns(4)
+        # Fed Rate & Direction
+        if df_fed is not None and not df_fed.empty:
+            curr_rate = df_fed['Fed_Rate'].iloc[-1]
+            past_rate = df_fed['Fed_Rate'].iloc[-90] # 3個月前
+            if curr_rate > past_rate + 0.1: rate_dir = "🔺 升息"
+            elif curr_rate < past_rate - 0.1: rate_dir = "🔻 降息"
+            else: rate_dir = "➡️ 維持"
+        else:
+            # Fallback to IRX (13-week T-bill)
+            curr_rate = df_close['^IRX'].iloc[-1] if '^IRX' in df_close.columns else 0
+            rate_dir = "短債預期"
+
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("💧 淨流動性", f"${liq:.2f}T")
         c2.metric("🌪️ VIX", f"{vix:.2f}", delta_color="inverse")
         c3.metric("⚖️ 10年殖利率", f"{tnx:.2f}%")
         c4.metric("🏭 銅金比", f"{cg:.2f}")
+        c5.metric("🏦 基準利率", f"{curr_rate:.2f}%", rate_dir)
 
         if df_macro is not None: st.plotly_chart(px.line(df_macro, y='Net_Liquidity', title='聯準會流動性趨勢', height=250), use_container_width=True)
 
-        st.markdown("#### 📊 CFO 戰略指令總表")
+        st.markdown("#### 📊 CFO 戰略指令總表 (Actionable)")
         summary = []
         for t in tickers_list:
             if t not in df_close.columns: continue
@@ -351,16 +392,14 @@ def main():
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
             bt = run_backtest_lab(t, df_close, df_high, df_low, 22)
             six_state = calc_six_dim_state(df_close[t])
-            
-            # [FIXED] 確保動態凱利被正確調用並顯示
             d_kelly = calc_dynamic_kelly(df_close[t], 63)
-            kelly_s = f"{d_kelly*100:.1f}%"
-            if d_kelly == 0: kelly_s = "🛑 0% (觀望)"
-            elif d_kelly > 0.5: kelly_s = f"🔥 {d_kelly*100:.0f}% (重倉)"
-            
             mvrv_s = calc_mvrv_z(df_close[t])
             mvrv_z = mvrv_s.iloc[-1] if mvrv_s is not None else 0
             
+            # 技術指標 (斜率/RSI/量)
+            rsi, slope, vol_r = calc_tech_indicators(df_close[t], df_vol[t])
+            
+            # 信心區間
             vol_daily = df_close[t].pct_change().std()
             price_sigma = df_close[t].iloc[-1] * vol_daily * np.sqrt(22)
             tgt_val = targets['Avg'] if targets and targets['Avg'] else 0
@@ -371,19 +410,27 @@ def main():
                 range_high = tgt_val + 2 * price_sigma
                 range_str = f"${range_low:.0f} ~ ${range_high:.0f}"
             
-            cfo_act = get_cfo_directive_v2(trend['p_now'], six_state, trend['status'], range_high, range_low, mvrv_z)
+            # CFO 指令 V3
+            cfo_act = get_cfo_directive_v3(trend['p_now'], six_state, trend['status'], range_high, range_low, mvrv_z, rsi, slope, vol_r)
+            
+            # Kelly 顯示
+            kelly_s = f"{d_kelly*100:.1f}%"
+            if d_kelly == 0: kelly_s = "🛑 0%"
+            elif d_kelly > 0.5: kelly_s = f"🔥 {d_kelly*100:.0f}%"
             
             summary.append({
-                "代號": t, "現價": f"${trend['p_now']:.2f}", 
+                "代號": t, 
+                "現價": f"${trend['p_now']:.2f}", 
                 "CFO 指令": cfo_act,
-                "動態 Kelly (3M)": kelly_s,  # 這裡確保有值
+                "動態 Kelly": kelly_s,
                 "預測值 (1M)": f"${tgt_val:.2f}" if tgt_val > 0 else "-",
                 "95% 區間": range_str,
-                "六維狀態": six_state,
-                "MVRV (Z)": f"{mvrv_z:.2f}",
+                "狀態": six_state,
+                "MVRV(Z)": f"{mvrv_z:.2f}",
                 "回測 Bias": f"{bt['Error']:.1%}" if bt else "-"
             })
         st.dataframe(pd.DataFrame(summary), use_container_width=True)
+        st.caption("📝 指令邏輯：融合均線斜率、量能爆發、RSI過熱與價值低估的綜合判斷。")
         
         st.markdown("---")
         st.subheader("2. 個股戰略雷達")
@@ -394,7 +441,7 @@ def main():
             bt = run_backtest_lab(t, df_close, df_high, df_low, 22)
             obv = calc_obv(df_close[t], df_vol[t])
             mvrv_s = calc_mvrv_z(df_close[t])
-            mvrv = mvrv_s.iloc[-1] if mvrv_s is not None else 0
+            mvrv_val = mvrv_s.iloc[-1] if mvrv_s is not None else 0
             comp_res = compare_with_leverage(t, df_close)
             six_state = calc_six_dim_state(df_close[t])
             d_kelly = calc_dynamic_kelly(df_close[t], 63)
@@ -452,6 +499,7 @@ def main():
         st.subheader("🔍 財務體質掃描")
         health_data = []
         for t in tickers_list:
+            if t not in df_close.columns: continue
             info = adv_data.get(t, {})
             is_etf = info.get('Type') == 'ETF'
             peg = info.get('PEG'); peg_s = "ETF" if is_etf else (f"{peg:.2f}" if peg is not None else "-")
