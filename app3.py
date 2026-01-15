@@ -306,7 +306,13 @@ def main():
         chip_data = []
         for t in tickers_list:
             if t not in df_close.columns: continue
-            info = adv_data.get(t, {}); chip_data.append({"代號": t, "機構持股": f"{info.get('Inst_Held',0)*100:.1f}%", "內部人": f"{info.get('Insider_Held',0)*100:.1f}%", "空單": f"{info.get('Short_Ratio',0):.2f}"})
+            info = adv_data.get(t, {})
+            chip_data.append({
+                "代號": t, 
+                "機構持股": f"{info.get('Inst_Held' or 0)*100:.1f}%", 
+                "內部人": f"{info.get('Insider_Held' or 0)*100:.1f}%", 
+                "空單": f"{info.get('Short_Ratio' or 0):.2f}"
+            })
         st.dataframe(pd.DataFrame(chip_data), use_container_width=True)
     with t3:
         st.subheader("🔍 財務體質")
