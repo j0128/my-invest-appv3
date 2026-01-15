@@ -218,8 +218,11 @@ def parse_input(text):
     port = {}
     for line in text.strip().split('\n'):
         if ',' in line:
-            parts = line.split(','); try: port[parts[0].strip().upper()] = float(parts[1].strip())
-            except: port[parts[0].strip().upper()] = 0.0
+            parts = line.split(','); 
+            try: 
+                port[parts[0].strip().upper()] = float(parts[1].strip())
+            except: 
+                port[parts[0].strip().upper()] = 0.0
     return port
 
 # --- MAIN APP ---
