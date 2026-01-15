@@ -318,7 +318,7 @@ def main():
         st.subheader("🔍 財務體質")
         h_data = []
         for t in tickers_list:
-            info = adv_data.get(t, {}); h_data.append({"代號": t, "PEG": f"{info.get('PEG',0):.2f}", "ROE": f"{info.get('ROE',0)*100:.1f}%", "淨利率": f"{info.get('Profit_Margin',0)*100:.1f}%", "流動比": info.get('Current_Ratio'), "負債/權益": info.get('Debt_Equity')})
+            info = adv_data.get(t, {}); h_data.append({"代號": t, "PEG": f"{info.get('PEG' or 0):.2f}", "ROE": f"{info.get('ROE' or 0)*100:.1f}%", "淨利率": f"{info.get('Profit_Margin' or 0)*100:.1f}%", "流動比": info.get('Current_Ratio'), "負債/權益": info.get('Debt_Equity')})
         st.dataframe(pd.DataFrame(h_data), use_container_width=True)
     with t4:
         st.subheader("🚦 策略回測 (SMA200)")
