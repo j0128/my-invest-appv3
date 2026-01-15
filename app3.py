@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 10.9: 執行官決策版", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 11.0: 全頻譜戰略版", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -176,7 +176,7 @@ def calc_mvrv_z(series):
     std200 = series.rolling(200).std()
     return (series - sma200) / std200
 
-# [NEW] 六維狀態計算
+# [六維狀態]
 def calc_six_dim_state(series):
     if len(series) < 22: return "N/A", "觀察"
     
@@ -187,7 +187,6 @@ def calc_six_dim_state(series):
     up = ma20 + 2 * std20
     lw = ma20 - 2 * std20
     
-    # 六維邏輯
     if p > up * 1.05: return "H3 極限噴出", "賣出 1/2 (清空槓桿)"
     if p > up: return "H2 情緒過熱", "賣出 1/3 (獲利了結)"
     if p > ma20: return "H1 多頭回歸", "續抱"
@@ -195,12 +194,8 @@ def calc_six_dim_state(series):
     if p < lw: return "L2 超賣區", "觀察買點"
     return "L1 震盪整理", "觀望"
 
-# [NEW] CFO 操作邏輯 (整合六維、預測、趨勢)
+# [CFO 操作邏輯]
 def get_cfo_directive(p_now, six_state, trend_status, range_high):
-    # 1. 優先級：止損 (趨勢損毀 = 跌破長期均線 or 短期 20MA? 這裡採用 20MA 短線保護)
-    # 六維狀態的 L1/L2/L3 其實都已經跌破 20MA (H1是 20MA之上)
-    # 我們這裡嚴格一點，如果趨勢狀態(200MA)是空頭 且 六維也是 L，那就要跑
-    
     action = "🟩 續抱/觀察"
     
     # 邏輯 A: 止損 (趨勢損毀)
@@ -226,7 +221,7 @@ def analyze_trend_multi(series):
     model = LinearRegression().fit(x, y)
     p_now = series.iloc[-1]
     sma200 = series.rolling(200).mean().iloc[-1]
-    status = "🔥 多頭" if p_now > sma200 else "🛑 空頭" # 200MA 定義大趨勢
+    status = "🔥 多頭" if p_now > sma200 else "🛑 空頭" # 200MA
     if p_now < sma200 and p_now > sma200 * 0.9: status = "📉 弱勢"
     return {"p_1m": model.predict([[len(y)+22]])[0].item(), "p_now": p_now, "status": status}
 
@@ -296,11 +291,11 @@ def main():
         tickers_list = list(portfolio_dict.keys())
         total_value = sum(portfolio_dict.values())
         st.metric("總資產 (Est.)", f"${total_value:,.0f}")
-        if st.button("🚀 啟動決策版", type="primary"): st.session_state['run'] = True
+        if st.button("🚀 啟動全頻譜版", type="primary"): st.session_state['run'] = True
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 10.9 正在擬定 CFO 決策..."):
+    with st.spinner("🦅 Alpha 11.0 正在執行全頻譜掃描..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
         df_macro = fetch_fred_macro(fred_key)
         adv_data = {t: get_advanced_info(t) for t in tickers_list}
@@ -326,7 +321,7 @@ def main():
 
         if df_macro is not None: st.plotly_chart(px.line(df_macro, y='Net_Liquidity', title='聯準會流動性趨勢', height=250), use_container_width=True)
 
-        st.markdown("#### 📊 CFO 戰略指令總表 (Actionable)")
+        st.markdown("#### 📊 CFO 戰略指令總表")
         summary = []
         for t in tickers_list:
             if t not in df_close.columns: continue
@@ -345,11 +340,11 @@ def main():
             tgt_val = targets['Avg'] if targets and targets['Avg'] else 0
             
             range_high = 0
+            range_str = "-"
             if tgt_val > 0:
                 range_low = tgt_val - 2 * price_sigma
                 range_high = tgt_val + 2 * price_sigma
                 range_str = f"${range_low:.0f} ~ ${range_high:.0f}"
-            else: range_str = "-"
             
             # 取得 CFO 綜合指令
             cfo_act = get_cfo_directive(trend['p_now'], six_state, trend['status'], range_high)
@@ -359,12 +354,13 @@ def main():
                 "現價": f"${trend['p_now']:.2f}", 
                 "六維狀態": six_state,
                 "CFO 指令": cfo_act,
-                "95% 區間上緣": f"${range_high:.2f}" if range_high > 0 else "-",
+                "預測值 (1M)": f"${tgt_val:.2f}" if tgt_val > 0 else "-",
+                "95% 預測區間": range_str,
                 "趨勢 (200MA)": trend['status'],
                 "回測 Bias": f"{bt['Error']:.1%}" if bt else "-"
             })
         st.dataframe(pd.DataFrame(summary), use_container_width=True)
-        st.caption("📝 CFO 指令邏輯：H2/H3 過熱或觸及預測區間上緣 -> 賣出獲利；跌破趨勢(空頭+L狀態) -> 止損。")
+        st.caption("📝 95% 區間：根據常態分佈計算。CFO 指令：結合過熱(H2/H3)、預測區間、與趨勢止損的三重邏輯。")
         
         st.markdown("---")
         st.subheader("2. 個股戰略雷達")
