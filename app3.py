@@ -72,7 +72,7 @@ def get_advanced_info(ticker):
         }
     except Exception: return {}
 
-# --- 2. 戰略與估值模型 (移除 P/E Target) ---
+# --- 2. 戰略與預測模型 (純技術版) ---
 
 def train_rf_model(df_close, ticker, days_forecast=22):
     try:
@@ -106,7 +106,7 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
         # 4. 隨機森林 AI (Random Forest)
         t_rf = train_rf_model(df_close, ticker, days_forecast)
         
-        # 5. 分析師平均目標價 (保留作為外部參考)
+        # 5. 分析師平均目標價 (保留作為參考)
         t_fund = f_data.get('Target_Mean')
 
         # 綜合計算 (移除 DCF/PE)
@@ -116,19 +116,10 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
         return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf}
     except Exception: return None
 
-        # 3. 綜合平均 (移除 PE Target)
-        targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf] if t is not None and not pd.isna(t)]
-        t_avg = sum(targets) / len(targets) if targets else None
-        
-        return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf, "DCF": t_dcf}
-    except Exception: return None
-
-# [回測引擎：驗證預測準確度]
 def run_backtest_lab(ticker, df_close, df_high, df_low, f_data, days_ago=22):
     if ticker not in df_close.columns or len(df_close) < 250: return None
     idx_past = len(df_close) - days_ago - 1
     p_now = df_close[ticker].iloc[-1]
-    
     df_past = df_close.iloc[:idx_past+1]
     h_past = df_high.iloc[:idx_past+1]
     l_past = df_low.iloc[:idx_past+1]
@@ -143,8 +134,6 @@ def analyze_trend_multi(series):
     if len(series) < 200: return {"status": "資料不足", "p_now": series.iloc[-1], "is_bull": False}
     p_now = series.iloc[-1]; sma200 = series.rolling(200).mean().iloc[-1]
     sma200_prev = series.rolling(200).mean().iloc[-10]
-    
-    # 牛熊判定：價格 > 200MA 且 200MA 斜率向上
     is_bull = (p_now > sma200) and (sma200 > sma200_prev)
     status = "🔥 多頭" if p_now > sma200 else "🛑 空頭"
     return {"status": status, "p_now": p_now, "sma200": sma200, "is_bull": is_bull}
@@ -219,66 +208,48 @@ def compare_with_leverage(ticker, df_close):
     benchs = ['QQQ', 'QLD', 'TQQQ']
     valid_benchs = [b for b in benchs if b in df_close.columns]
     if not valid_benchs: return None
-    
     lookback = 252 if len(df_close) > 252 else len(df_close)
     df_compare = df_close[[ticker] + valid_benchs].iloc[-lookback:].copy()
     df_norm = df_compare / df_compare.iloc[0] * 100
-    
     ret_ticker = df_norm[ticker].iloc[-1] - 100
     ret_tqqq = df_norm['TQQQ'].iloc[-1] - 100 if 'TQQQ' in df_norm else 0
-    
     status = "👑 跑贏 TQQQ" if ret_ticker > ret_tqqq else "💀 輸給 TQQQ"
     return df_norm, status, ret_ticker, ret_tqqq
 
-# --- 3. 薪資流與財務計算 ---
+# --- 3. 薪資流與回測引擎 ---
 
 def run_strategy_backtest_salary_flow_v2(df_in, vol_in):
     df = df_in.copy(); df['Volume'] = vol_in
     if len(df) > 300: df = df.iloc[-300:]
-    
     df['SMA20'] = df['Close'].rolling(20).mean(); df['SMA200'] = df['Close'].rolling(200).mean()
     df['Upper'] = df['SMA20'] + 2 * df['Close'].rolling(20).std(); df['Lower'] = df['SMA20'] - 2 * df['Close'].rolling(20).std()
     df['RSI'] = 100 - (100 / (1 + df['Close'].diff().clip(lower=0).ewm(13).mean() / df['Close'].diff().clip(upper=0).abs().ewm(13).mean()))
-    
     cash_dca = 0; shares_dca = 0; cash_strat = 0; shares_strat = 0; invested = 0; history = []; last_month = -1
-    
     for i in range(len(df)):
         p = df['Close'].iloc[i]; date = df.index[i]
-        
-        # 薪資發放與DCA
         if date.month != last_month:
             cash_dca += 10000; cash_strat += 10000; invested += 10000; last_month = date.month
             buy_dca = cash_dca // p; shares_dca += buy_dca; cash_dca -= buy_dca * p
-            
         if i > 20:
-            ma20 = df['SMA20'].iloc[i]; ma200 = df['SMA200'].iloc[i]
-            bull = (p > ma200) and (ma200 > df['SMA200'].iloc[i-5]) and (p > ma20)
+            ma20 = df['SMA20'].iloc[i]; ma200 = df['SMA200'].iloc[i]; bull = (p > ma200) and (ma200 > df['SMA200'].iloc[i-5]) and (p > ma20)
             rsi = df['RSI'].iloc[i]; up = df['Upper'].iloc[i]; lw = df['Lower'].iloc[i]
-            
             sell_pct = 0
             if p < ma20 and p < ma200: sell_pct = 1.0
             elif p > up * 1.05 or rsi > (85 if bull else 80): sell_pct = 0.5
-            
             if sell_pct > 0 and shares_strat > 0:
                 s_amt = int(shares_strat * sell_pct); shares_strat -= s_amt; cash_strat += s_amt * p
-                
             if sell_pct == 0:
                 buy_pct = 0.8 if bull else (0.3 if p < lw else 0)
                 if buy_pct > 0 and cash_strat > 100:
                     b_val = cash_strat * buy_pct; buy = b_val // p; shares_strat += buy; cash_strat -= buy * p
-                    
         history.append({"Date": date, "DCA": cash_dca + shares_dca * p, "Strat": cash_strat + shares_strat * p, "Inv": invested})
-    
-    res = pd.DataFrame(history).set_index("Date")
-    return res, (res['DCA'].iloc[-1]-invested)/invested, (res['Strat'].iloc[-1]-invested)/invested, invested, res['DCA'].iloc[-1], res['Strat'].iloc[-1]
+    res = pd.DataFrame(history).set_index("Date"); return res, (res['DCA'].iloc[-1]-invested)/invested, (res['Strat'].iloc[-1]-invested)/invested, invested, res['DCA'].iloc[-1], res['Strat'].iloc[-1]
 
 def run_traffic_light(series):
-    sma200 = series.rolling(200).mean()
-    df = pd.DataFrame({'Close': series, 'SMA200': sma200})
+    sma200 = series.rolling(200).mean(); df = pd.DataFrame({'Close': series, 'SMA200': sma200})
     df['Signal'] = np.where(df['Close'] > df['SMA200'], 1, 0)
     df['Strategy'] = (1 + df['Close'].pct_change() * df['Signal'].shift(1)).cumprod()
-    df['BuyHold'] = (1 + df['Close'].pct_change()).cumprod()
-    return df['Strategy'], df['BuyHold']
+    df['BuyHold'] = (1 + df['Close'].pct_change()).cumprod(); return df['Strategy'], df['BuyHold']
 
 def calc_mortgage(amt, yrs, rate):
     r = rate / 100 / 12; m = yrs * 12
@@ -363,7 +334,7 @@ def main():
             obv = calc_obv(df_close[t], df_vol[t])
             comp_res = compare_with_leverage(t, df_close)
             
-            with st.expander(f"🦅 {t} 戰略深度分析 (DCF/Backtest)", expanded=False):
+            with st.expander(f"🦅 {t} 戰略深度分析 (Backtest Error)", expanded=False):
                 k1, k2, k3 = st.columns([2, 1, 1])
                 with k1: 
                     if comp_res: st.plotly_chart(px.line(comp_res[0], title=f"{t} vs TQQQ").update_layout(height=300), use_container_width=True)
@@ -390,11 +361,25 @@ def main():
         h_data = [{"代號": t, "PEG": f"{(adv_data.get(t,{}).get('PEG') or 0):.2f}", "ROE": f"{(adv_data.get(t,{}).get('ROE') or 0)*100:.1f}%", "淨利率": f"{(adv_data.get(t,{}).get('Profit_Margin') or 0)*100:.1f}%"} for t in tickers_list]
         st.dataframe(pd.DataFrame(h_data), use_container_width=True)
 
+    # === TAB 4~6: 回測/財報/房貸 ===
+    with t4:
+        st.subheader("🚦 SMA200 回測")
+        for t in tickers_list:
+            if t in df_close.columns:
+                s, b = run_traffic_light(df_close[t]); st.write(f"**{t}**")
+                st.line_chart(pd.DataFrame({"策略": s, "買入持有": b}).dropna())
+
+    with t5:
+        st.subheader("💰 CFO 財報")
+        inc = st.number_input("月收", 80000); exp = st.number_input("月支", 40000)
+        st.metric("每月結餘", f"${inc-exp:,.0f}", f"儲蓄率: {(inc-exp)/inc:.1%}")
+
     with t6:
         st.subheader("🏠 房貸目標")
         amt = st.number_input("貸款金額", 10000000); rt = st.number_input("年利率", 2.2)
-        pmt, _ = calc_mortgage(amt, 30, rt); st.metric("月付", f"${pmt:,.0f}")
+        pmt, _ = calc_mortgage(amt, 30, rt); st.metric("月付額", f"${pmt:,.0f}")
 
+    # === TAB 7: 策略實驗室 ===
     with t7:
         st.subheader("📊 混合戰略實驗室")
         lab_ticker = st.selectbox("選擇回測標的", sorted(list(set(tickers_list + ['TQQQ', 'QQQ', 'SPY']))))
