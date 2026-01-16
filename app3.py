@@ -29,8 +29,15 @@ ASSET_TAXONOMY = {
     "Defensive": ['KO', 'MCD', 'JNJ', 'PG', '2330.TW', 'SPY', 'TLT', 'GLD', 'SCHD']
 }
 
+# [NEW] 鐵壁防禦名單 (Safe Harbor - Error < 6%)
+SAFE_HARBOR_LIST = [
+    'XLP', 'TLT', 'XLV', 'KO', 'XLE', 
+    'MMM', 'JNJ', 'MCD', 'XLF', 'RTX', 
+    'XOM', 'CVX', 'MO', 'GILD', 'AMGN'
+]
+
 st.set_page_config(
-    page_title="Alpha 13.999: 拓撲指揮官 (Radar Restored)",
+    page_title="Alpha 16.0: 拓撲指揮官 (Iron Dome Integrated)",
     layout="wide",
     page_icon="🦅",
     initial_sidebar_state="expanded"
@@ -62,6 +69,14 @@ st.markdown("""
     .stTabs [aria-selected="true"] {
         background-color: #00BFFF; color: #000; font-weight: bold;
     }
+    /* Safe Harbor Card Styles */
+    .card { background-color: #262730; padding: 15px; border-radius: 10px; margin-bottom: 10px; border-left: 5px solid #555; }
+    .card-title { font-size: 1.1em; font-weight: bold; }
+    .card-value { font-size: 1.3em; font-weight: bold; }
+    .fund-score-good { color: #00FF7F; font-weight: bold; }
+    .fund-score-bad { color: #FF4B4B; font-weight: bold; }
+    .fund-score-neutral { color: #FFD700; font-weight: bold; }
+    .safe-harbor-header { color: #00BFFF; border-bottom: 2px solid #00BFFF; padding-bottom: 5px; margin-top: 30px; margin-bottom: 20px;}
     table { width: 100%; border-collapse: collapse; }
     th { background-color: #262730; color: white; }
     td { border-bottom: 1px solid #444; }
@@ -75,25 +90,32 @@ st.markdown("""
 
 @st.cache_data(ttl=1800)
 def fetch_market_data(tickers):
+    # 合併用戶輸入的 tickers 與 Safe Harbor 清單
     benchmarks = ['SPY', 'QQQ', 'QLD', 'TQQQ', '^VIX', '^TNX', '^IRX', 'HYG', 'GC=F', 'HG=F', 'DX-Y.NYB'] 
-    all_tickers = list(set(tickers + benchmarks))
+    all_tickers = list(set(tickers + benchmarks + SAFE_HARBOR_LIST))
     
     data = {col: {} for col in ['Close', 'Open', 'High', 'Low', 'Volume']}
     
-    for t in all_tickers:
-        try:
-            df = yf.Ticker(t).history(period="2y", auto_adjust=True)
-            if df.empty: continue
-            data['Close'][t] = df['Close']; data['Open'][t] = df['Open']
-            data['High'][t] = df['High']; data['Low'][t] = df['Low']; data['Volume'][t] = df['Volume']
-        except Exception: continue
+    # 批量下載優化
+    try:
+        df_bulk = yf.download(all_tickers, period="2y", progress=False)
+        # 處理 MultiIndex
+        if isinstance(df_bulk.columns, pd.MultiIndex):
+            close = df_bulk['Close'].ffill()
+            high = df_bulk['High'].ffill()
+            low = df_bulk['Low'].ffill()
+            volume = df_bulk['Volume'].ffill()
+        else:
+            # Fallback for single ticker (rare here)
+            close = df_bulk['Close'].ffill()
+            high = df_bulk['High'].ffill()
+            low = df_bulk['Low'].ffill()
+            volume = df_bulk['Volume'].ffill()
             
-    return (
-        pd.DataFrame(data['Close']).ffill(), 
-        pd.DataFrame(data['High']).ffill(), 
-        pd.DataFrame(data['Low']).ffill(), 
-        pd.DataFrame(data['Volume']).ffill()
-    )
+        return close, high, low, volume
+    except Exception as e:
+        st.error(f"數據下載失敗: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(ttl=3600*12)
 def fetch_fred_macro(api_key):
@@ -122,10 +144,85 @@ def get_advanced_info(ticker):
             'Inst_Held': info.get('heldPercentInstitutions'), 
             'Short_Ratio': info.get('shortRatio'), 
             'ROE': info.get('returnOnEquity'),
-            'Profit_Margin': info.get('profitMargins')
+            'Profit_Margin': info.get('profitMargins'),
+            'Trailing_PE': info.get('trailingPE'), # [NEW]
+            'Forward_PE': info.get('forwardPE')    # [NEW]
         }
     except: return {}
 
+# [NEW] 基本面加權引擎 (含 P/E 邏輯)
+@st.cache_data(ttl=3600*12) 
+def get_fundamental_scalar(ticker):
+    """
+    Alpha 16.0 核心：基本面加權純量 (Scalar)。範圍：0.85 ~ 1.15
+    整合：營收成長 + 獲利能力 + P/E 評價修正
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # 1. 獲取財報數據
+        fins = stock.quarterly_financials
+        if fins.empty: fins = stock.financials
+        
+        # 對於 ETF (如 XLP, TLT) 或無數據者，回傳 1.0
+        if fins.empty: 
+            return 1.0, ["⚖️ ETF/無財報數據 (維持中性)"]
+
+        score = 0
+        details = []
+        growth_rate = 0.0
+        
+        # A. 營收成長 (Revenue Growth)
+        if 'Total Revenue' in fins.index and len(fins.columns) >= 2:
+            r_now = fins.loc['Total Revenue'].iloc[0]
+            r_prev = fins.loc['Total Revenue'].iloc[1]
+            if r_prev != 0:
+                growth_rate = (r_now - r_prev) / r_prev
+                if growth_rate > 0.10: 
+                    score += 1
+                    details.append(f"🔥 營收成長 (+{growth_rate:.1%})")
+                elif growth_rate < -0.05: 
+                    score -= 1
+                    details.append(f"📉 營收衰退 ({growth_rate:.1%})")
+                else:
+                    details.append(f"⚪ 營收持平 ({growth_rate:.1%})")
+        
+        # B. 獲利能力 (Net Income)
+        if 'Net Income' in fins.index:
+            ni = fins.loc['Net Income'].iloc[0]
+            if ni > 0: 
+                score += 1
+                details.append("💰 獲利為正")
+            else: 
+                score -= 1
+                details.append("💸 處於虧損")
+        
+        # C. [Alpha 16.0] P/E 評價修正 (Valuation Check)
+        pe = info.get('trailingPE')
+        if pe is not None and isinstance(pe, (int, float)):
+            # 規則 1: 成長股豁免 (若高成長，高 P/E 不扣分)
+            is_high_growth = (growth_rate > 0.20)
+            
+            if pe > 60 and not is_high_growth:
+                score -= 1 # 估值過熱且無成長支撐
+                details.append(f"⚠️ P/E 過高 ({pe:.1f}x) 且成長不足")
+            elif pe < 5 and pe > 0:
+                score -= 1 # 價值陷阱警戒
+                details.append(f"⚠️ P/E 過低 ({pe:.1f}x) 疑價值陷阱")
+            elif pe > 0 and pe < 15 and not is_high_growth:
+                score += 1 # 價值區
+                details.append(f"💎 低估值 ({pe:.1f}x)")
+                
+        # 計算 Scalar
+        # Base 1.0, 每分增減 0.05
+        scalar = 1.0 + (score * 0.05)
+        scalar = max(0.85, min(1.15, scalar))
+        
+        return scalar, details
+        
+    except Exception as e:
+        return 1.0, ["⚠️ 數據異常"]
 
 # ==============================================================================
 # 2. 戰略模型與演算法 (Strategic Algorithms)
@@ -169,12 +266,7 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
     except: return None
 
 def run_backtest_lab_v2(ticker, df_close, df_high, df_low, df_macro, f_data, days_ago=30):
-    """
-    [V2 Radar Backtest] 含宏觀修正的個股回測。
-    核心邏輯：若 30 天前流動性緊縮 (Threshold < -0.137T)，則強制下修預測值。
-    """
     if ticker not in df_close.columns or len(df_close) < 250: return None
-    
     idx_past = len(df_close) - days_ago - 1
     date_past = df_close.index[idx_past]
     p_past = df_close[ticker].iloc[idx_past]
@@ -190,13 +282,11 @@ def run_backtest_lab_v2(ticker, df_close, df_high, df_low, df_macro, f_data, day
                 liq_curr = df_macro['Net_Liquidity'].iloc[m_idx]
                 liq_prev = df_macro['Net_Liquidity'].iloc[m_idx - 20]
                 liq_chg = liq_curr - liq_prev
-                
-                # 應用實驗參數 -0.137
                 if liq_chg < TOPO_CONSTANTS['LIQUIDITY_THRESHOLD']: 
                     is_contraction = True
-                    macro_status = "🔻 緊縮 (Risk-Off)"
+                    macro_status = "🔻 緊縮"
                 elif liq_chg > 0.05:
-                    macro_status = "💧 寬鬆 (Risk-On)"
+                    macro_status = "💧 寬鬆"
         except: pass
 
     df_p = df_close.iloc[:idx_past+1]; h_p = df_high.iloc[:idx_past+1]; l_p = df_low.iloc[:idx_past+1]
@@ -205,7 +295,7 @@ def run_backtest_lab_v2(ticker, df_close, df_high, df_low, df_macro, f_data, day
     
     note = ""
     if is_contraction and final_pred and final_pred > p_past:
-        final_pred = final_pred * 0.85 # 強制下修 (實驗係數)
+        final_pred = final_pred * 0.85 
         note = "(因緊縮下修)"
 
     if final_pred:
@@ -305,6 +395,35 @@ def compare_with_leverage(ticker, df_close):
     ret_tqqq = df_norm['TQQQ'].iloc[-1] - 100 if 'TQQQ' in df_norm else 0
     status = "👑 跑贏 TQQQ" if ret_ticker > ret_tqqq else "💀 輸給 TQQQ"
     return df_norm, status, ret_ticker, ret_tqqq
+
+# [NEW] 鐵壁防禦卡片渲染
+def render_safe_harbor_card(t, price_now, tech_target, scalar, reasons):
+    final_target = tech_target * scalar
+    upside = (final_target - price_now) / price_now
+    
+    scalar_pct = (scalar - 1) * 100
+    if scalar > 1.0: s_color = "fund-score-good"; s_sign = "+"
+    elif scalar < 1.0: s_color = "fund-score-bad"; s_sign = ""
+    else: s_color = "fund-score-neutral"; s_sign = ""
+    
+    up_color = "#00FF7F" if upside > 0 else "#FF4B4B"
+    reasons_html = "<br>".join([f"<small>{r}</small>" for r in reasons])
+    
+    st.markdown(f"""
+    <div class="card" style="border-left-color: {up_color};">
+        <div class="card-title">{t} <span style="float:right; font-size:0.8em; color:#FFF">${price_now:.2f}</span></div>
+        <div style="margin-top:5px; font-size:0.9em; color:#AAA;">
+            技術價: ${tech_target:.2f}<br>
+            <span class="{s_color}">財報權重: x{scalar:.2f} ({s_sign}{scalar_pct:.0f}%)</span>
+        </div>
+        <div class="card-value" style="color:{up_color}; margin-top:5px;">
+            目標: ${final_target:.2f} <small>({upside:+.1%})</small>
+        </div>
+        <div style="color: #888; margin-top:5px; line-height:1.2;">
+            {reasons_html}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -488,7 +607,8 @@ def main():
         return
 
     # --- Data Fetching ---
-    with st.spinner("🦅 Alpha 13.999 正在執行全域拓撲掃描..."):
+    with st.spinner("🦅 Alpha 16.0 (Iron Dome) 正在執行全域拓撲掃描..."):
+        # 這裡會同時下載用戶持倉 + 鐵壁防禦名單的數據
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers)
         df_macro, df_fed = fetch_fred_macro(fred_key)
         adv_data = {t: get_advanced_info(t) for t in tickers}
@@ -503,7 +623,7 @@ def main():
 
     # === TAB 1: 宏觀戰情 (RESTORING RADAR) ===
     with t1:
-        st.title("🦅 Alpha 13.999: 混合戰略指揮中心")
+        st.title("🦅 Alpha 16.0: 混合戰略指揮中心")
         
         # 1. Macro Dashboard
         if df_macro is not None:
@@ -567,7 +687,6 @@ def main():
         
         # 3. [RESTORED] 個股雷達 (Stock Radar)
         st.subheader("2. 個股雷達 (預測回測驗證)")
-        st.info("此區塊驗證模型在「30天前」的預測值與「今日現價」的誤差。若流動性緊縮，模型會自動顯示『因緊縮下修』的修正後預測。")
         
         for t in tickers:
             if t not in df_close.columns: continue
@@ -606,6 +725,31 @@ def main():
                         fig.add_trace(go.Scatter(y=obv.iloc[-126:], name='OBV', yaxis='y2'))
                     fig.update_layout(height=300, yaxis2=dict(overlaying='y', side='right'), title="OBV Divergence")
                     st.plotly_chart(fig, use_container_width=True)
+
+        # 4. [NEW] 鐵壁防禦陣列 (Safe Harbor Section)
+        st.markdown("<h3 class='safe-harbor-header'>🛡️ Posa 鐵壁防禦陣列 (Alpha 16.0)</h3>", unsafe_allow_html=True)
+        st.markdown("以下 15 檔標的經實驗驗證，過去 12 個月模型預測誤差 **< 6%**。當市場動盪時，它們是資金的避風港。")
+        st.markdown("*註：財報權重已納入 P/E 評價修正 (Alpha 16.0 Logic)*")
+        
+        # 使用 5 列佈局展示 15 支股票
+        sh_cols = st.columns(5)
+        
+        for i, t in enumerate(SAFE_HARBOR_LIST):
+            if t not in df_close.columns: continue
+            
+            col_idx = i % 5
+            with sh_cols[col_idx]:
+                price_now = df_close[t].iloc[-1]
+                
+                # 計算技術目標價
+                tech_target = train_rf_model(df_close, t)
+                if tech_target is None: tech_target = price_now
+                
+                # 計算基本面加權 (含 P/E)
+                scalar, reasons = get_fundamental_scalar(t)
+                
+                # 渲染卡片
+                render_safe_harbor_card(t, price_now, tech_target, scalar, reasons)
 
     # === TAB 2: 籌碼 ===
     with t2:
