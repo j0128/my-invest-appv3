@@ -130,16 +130,14 @@ def train_rf_model(df_close, ticker, days_forecast=22):
         return model.predict(X.iloc[[-1]])[0]
     except Exception: return None
 
+# 找到這個函式並替換內容
 def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forecast=22):
     if ticker not in df_close.columns: return None
     c = df_close[ticker]; h = df_high[ticker]; l = df_low[ticker]
-    if len(c) < 100: return None
-    
     try:
-        # 1. 技術指標預測
+        # 1. 技術面預測 (保留)
         tr = pd.concat([h-l, (h-c.shift(1)).abs(), (l-c.shift(1)).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
-        t_atr = c.iloc[-1] + (atr * np.sqrt(days_forecast))
+        t_atr = c.iloc[-1] + (tr.rolling(14).mean().iloc[-1] * np.sqrt(days_forecast))
         
         mu = c.pct_change().mean()
         t_mc = c.iloc[-1] * ((1 + mu)**days_forecast)
@@ -149,31 +147,27 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
         
         t_rf = train_rf_model(df_close, ticker, days_forecast)
         
-        # 2. 財務估值預測 (補回 DCF & PE)
+        # 2. 財務估值 (移除 PE Target，保留 DCF)
         eps = f_data.get('trailingEps') or 0
-        fwd_eps = f_data.get('forwardEps') or 0
         hist_pe = f_data.get('trailingPE') or 20
         
-        # Forward PE Target
-        t_pe = (fwd_eps * hist_pe) if fwd_eps > 0 else None
-        
         # 簡易 DCF 模型 (5年折現)
-        growth = (f_data.get('PEG') or 1.5) / 10 # 假設 PEG 換算成長率
-        discount_rate = 0.10 # 假設折現率 10%
-        term_pe = hist_pe # 終值本益比
+        growth = (f_data.get('PEG') or 1.5) / 10 
+        discount_rate = 0.10 
         
         if eps > 0:
             future_eps = eps * ((1 + growth)**5)
-            terminal_val = future_eps * term_pe
+            terminal_val = future_eps * hist_pe
             t_dcf = terminal_val / ((1 + discount_rate)**5)
         else:
             t_dcf = None
 
-        # 綜合平均
-        targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf, t_pe, t_dcf] if t is not None and not pd.isna(t)]
+        # 3. 綜合平均 (移除 t_pe)
+        targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf, t_dcf] if t is not None and not pd.isna(t)]
         t_avg = sum(targets) / len(targets) if targets else None
         
-        return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf, "PE_Target": t_pe, "DCF": t_dcf}
+        # 回傳字典中也移除 PE_Target
+        return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf, "DCF": t_dcf}
     except Exception: return None
 
 # [補回：預測值回測引擎]
