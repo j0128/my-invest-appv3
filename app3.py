@@ -328,17 +328,33 @@ def run_strategy_backtest_pro(df_in, vol_in, frequency_days=1):
     res = pd.DataFrame(history).set_index("Date"); return res, (res['DCA'].iloc[-1]-invested)/invested, (res['Strat'].iloc[-1]-invested)/invested, invested, res['DCA'].iloc[-1], res['Strat'].iloc[-1]
 
 # --- 3. 財務 ---
+# --- 3. 財務 ---
 def run_traffic_light(series):
-    sma200 = series.rolling(200).mean(); df = pd.DataFrame({'Close': series, 'SMA200': sma200}); df['Signal'] = np.where(df['Close'] > df['SMA200'], 1, 0); df['Strategy'] = (1 + df['Close'].pct_change() * df['Signal'].shift(1)).cumprod(); df['BuyHold'] = (1 + df['Close'].pct_change()).cumprod(); return df['Strategy'], df['BuyHold']
+    sma200 = series.rolling(200).mean()
+    df = pd.DataFrame({'Close': series, 'SMA200': sma200})
+    df['Signal'] = np.where(df['Close'] > df['SMA200'], 1, 0)
+    df['Strategy'] = (1 + df['Close'].pct_change() * df['Signal'].shift(1)).cumprod()
+    df['BuyHold'] = (1 + df['Close'].pct_change()).cumprod()
+    return df['Strategy'], df['BuyHold']
+
+def calc_mortgage(amt, yrs, rate):
+    # 這裡必須在 main 之外定義
+    r = rate / 100 / 12  
+    m = yrs * 12         
+    if r > 0:
+        pmt = amt * (r * (1 + r)**m) / ((1 + r)**m - 1)
+    else:
+        pmt = amt / m
+    return pmt, pmt * m - amt
 
 def parse_input(text):
     port = {}
     for line in text.strip().split('\n'):
         if ',' in line:
-            parts = line.split(','); 
-            try: 
+            parts = line.split(',')
+            try:
                 port[parts[0].strip().upper()] = float(parts[1].strip())
-            except: 
+            except:
                 port[parts[0].strip().upper()] = 0.0
     return port
 
@@ -350,7 +366,8 @@ def main():
         user_cash = st.number_input("💰 現金儲備 (USD)", value=10000.0, step=1000.0)
         default_input = "BTC-USD, 10000\nAMD, 10000\nNVDA, 10000\nTLT, 5000\nURA, 5000"
         user_input = st.text_area("持倉市值清單", default_input, height=150)
-        portfolio_dict = parse_input(user_input); tickers_list = list(portfolio_dict.keys())
+        portfolio_dict = parse_input(user_input)
+        tickers_list = list(portfolio_dict.keys())
         stock_value = sum(portfolio_dict.values())
         total_assets = user_cash + stock_value
         st.metric("🏦 總資產", f"${total_assets:,.0f}", f"現金: ${user_cash:,.0f}")
@@ -361,49 +378,67 @@ def main():
 
     with st.spinner("🦅 Alpha 12.6 正在擬定戰略指令..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
-        df_macro, df_fed = fetch_fred_macro(fred_key); adv_data = {t: get_advanced_info(t) for t in tickers_list}
+        df_macro, df_fed = fetch_fred_macro(fred_key)
+        adv_data = {t: get_advanced_info(t) for t in tickers_list}
 
     if df_close.empty: st.error("❌ 無數據"); st.stop()
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室回測引擎"])
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室"])
 
     with t1:
         st.subheader("1. 宏觀與總表")
-        liq = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0; vix = df_close['^VIX'].iloc[-1]; tnx = df_close['^TNX'].iloc[-1]
+        liq = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0
+        vix = df_close['^VIX'].iloc[-1]; tnx = df_close['^TNX'].iloc[-1]
         try: cg = (df_close['HG=F'].iloc[-1]/df_close['GC=F'].iloc[-1])*1000
         except: cg = 0
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("💧 淨流動性", f"${liq:.2f}T"); c2.metric("🌪️ VIX", f"{vix:.2f}", delta_color="inverse"); c3.metric("⚖️ 10年債", f"{tnx:.2f}%"); c4.metric("🏭 銅金比", f"{cg:.2f}"); c5.metric("🏦 Fed利率", f"{df_fed['Fed_Rate'].iloc[-1]:.2f}%" if df_fed is not None else "N/A")
+        c1.metric("💧 淨流動性", f"${liq:.2f}T")
+        c2.metric("🌪️ VIX", f"{vix:.2f}", delta_color="inverse")
+        c3.metric("⚖️ 10年債", f"{tnx:.2f}%")
+        c4.metric("🏭 銅金比", f"{cg:.2f}")
+        c5.metric("🏦 Fed利率", f"{df_fed['Fed_Rate'].iloc[-1]:.2f}%" if df_fed is not None else "N/A")
         
-        st.markdown("#### 📊 CFO 戰略指令總表 (含建倉建議金額)")
+        st.markdown("#### 📊 CFO 戰略指令總表")
         summary = []
         for t in tickers_list:
             if t not in df_close.columns: continue
-            trend = analyze_trend_multi(df_close[t]); targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
-            six_s = calc_six_dim_state(df_close[t]); d_kelly = calc_dynamic_kelly(df_close[t], 63); mvrv_s = calc_mvrv_z(df_close[t]); mvrv_z = mvrv_s.iloc[-1] if mvrv_s is not None else 0
+            trend = analyze_trend_multi(df_close[t])
+            targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
+            six_s = calc_six_dim_state(df_close[t])
+            d_kelly = calc_dynamic_kelly(df_close[t], 63)
+            mvrv_s = calc_mvrv_z(df_close[t])
+            mvrv_z = mvrv_s.iloc[-1] if mvrv_s is not None else 0
             rsi, slope, vol_r = calc_tech_indicators(df_close[t], df_vol[t])
-            vol_d = df_close[t].pct_change().std(); price_s = df_close[t].iloc[-1] * vol_d * np.sqrt(22); tgt = targets['Avg'] if targets and targets['Avg'] else 0
-            # 計算建倉建議
+            vol_d = df_close[t].pct_change().std()
+            price_s = df_close[t].iloc[-1] * vol_d * np.sqrt(22)
+            tgt = targets['Avg'] if targets and targets['Avg'] else 0
+            
             cfo_act, build_pct = get_cfo_directive_v3(trend['p_now'], six_s, trend['status'], tgt+2*price_s, tgt-2*price_s, mvrv_z, rsi, slope, vol_r)
             
-            # [錢包邏輯] 
             stock_budget = total_assets * slot_limit
-            # 參考 Kelly: 如果 Kelly 建議更小，則縮小預算
             effective_budget = min(stock_budget, total_assets * d_kelly) if d_kelly > 0 else stock_budget
             suggested_pos = effective_budget * build_pct
             current_pos = portfolio_dict.get(t, 0)
             to_buy = max(0, suggested_pos - current_pos)
             
-            summary.append({"代號": t, "現價": f"${trend['p_now']:.2f}", "CFO 指令": cfo_act, "建議建倉(USD)": f"${to_buy:,.0f}" if build_pct > 0 else "-", "預計總額": f"${suggested_pos:,.0f}" if build_pct > 0 else "-", "Kelly": f"{d_kelly*100:.1f}%", "預測值": f"${tgt:.2f}"})
+            summary.append({
+                "代號": t, "現價": f"${trend['p_now']:.2f}", 
+                "CFO 指令": cfo_act, 
+                "建議建倉(USD)": f"${to_buy:,.0f}" if build_pct > 0 else "-",
+                "預計總額": f"${suggested_pos:,.0f}" if build_pct > 0 else "-",
+                "Kelly": f"{d_kelly*100:.1f}%", "預測值": f"${tgt:.2f}"
+            })
         st.dataframe(pd.DataFrame(summary), use_container_width=True)
-        st.caption(f"💡 建議金額基於：單一持股預算上限 ${total_assets * slot_limit:,.0f} (總資產的 {slot_limit*100:.0f}%) 與動態凱利保守值。")
 
         st.markdown("---")
         st.subheader("2. 個股戰略雷達 (詳細分析)")
         for t in tickers_list:
             if t not in df_close.columns: continue
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
-            bt = run_backtest_lab(t, df_close, df_high, df_low, 22); obv = calc_obv(df_close[t], df_vol[t]); comp_res = compare_with_leverage(t, df_close); six_s = calc_six_dim_state(df_close[t])
+            bt = run_backtest_lab(t, df_close, df_high, df_low, 22)
+            obv = calc_obv(df_close[t], df_vol[t])
+            comp_res = compare_with_leverage(t, df_close)
+            six_s = calc_six_dim_state(df_close[t])
             with st.expander(f"🦅 {t} | {six_s} | 目標: ${targets['Avg']:.2f}", expanded=False):
                 k1, k2, k3 = st.columns([2, 1, 1])
                 with k1: 
@@ -414,9 +449,11 @@ def main():
                     if bt: st.info(f"回測誤差: {bt['Error']:.1%}")
                 with k3:
                     st.markdown("#### 📉 資金流 (OBV)")
-                    fig = go.Figure(); fig.add_trace(go.Scatter(y=df_close[t].iloc[-126:], name='Price'))
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(y=df_close[t].iloc[-126:], name='Price'))
                     if obv is not None: fig.add_trace(go.Scatter(y=obv.iloc[-126:], name='OBV', yaxis='y2'))
-                    fig.update_layout(height=300, yaxis2=dict(overlaying='y', side='right')); st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(height=300, yaxis2=dict(overlaying='y', side='right'))
+                    st.plotly_chart(fig, use_container_width=True)
 
     with t2:
         st.subheader("🐋 籌碼與內部人")
@@ -431,6 +468,7 @@ def main():
                 "空單": f"{(info.get('Short_Ratio') or 0):.2f}"
             })
         st.dataframe(pd.DataFrame(chip_data), use_container_width=True)
+
     with t3:
         st.subheader("🔍 財務體質")
         h_data = []
@@ -442,15 +480,21 @@ def main():
                 "ROE": f"{(info.get('ROE') or 0)*100:.1f}%", 
                 "淨利率": f"{(info.get('Profit_Margin') or 0)*100:.1f}%", 
                 "流動比": info.get('Current_Ratio'), 
-                "負債/權益": info.get('Debt_Equity')})
+                "負債/權益": info.get('Debt_Equity')
+            })
         st.dataframe(pd.DataFrame(h_data), use_container_width=True)
+
     with t4:
         st.subheader("🚦 策略回測 (SMA200)")
         for t in tickers_list:
             if t in df_close.columns: s, b = run_traffic_light(df_close[t]); st.write(f"**{t}**"); st.line_chart(pd.concat([s, b], axis=1))
+
     with t5:
         st.subheader("💰 CFO 財報")
-        inc = st.number_input("月收", 80000); exp = st.number_input("月支", 40000); st.metric("儲蓄率", f"{(inc-exp)/inc:.1%}")
+        inc = st.number_input("月收", 80000)
+        exp = st.number_input("月支", 40000)
+        st.metric("儲蓄率", f"{(inc-exp)/inc:.1%}")
+
     with t6:
         st.subheader("🏠 房貸目標")
         amt = st.number_input("貸", 10000000)
@@ -458,48 +502,28 @@ def main():
         pmt, _ = calc_mortgage(amt, 30, rt)
         st.metric("月付", f"${pmt:,.0f}")
 
-def calc_mortgage(amt, yrs, rate):
-    	# amt: 貸款總額, yrs: 貸款年限, rate: 年利率 (%)
-    r = rate / 100 / 12  # 月利率
-    m = yrs * 12         # 總期數
-    if r > 0:
-        pmt = amt * (r * (1 + r)**m) / ((1 + r)**m - 1)
-    else:
-        pmt = amt / m
-    return pmt, pmt * m - amt
-
     with t7:
-        st.subheader("📈 買入賣出策略實驗室 (Strategy Lab)")
-        st.info("💡 模擬情境：過去300天，初始本金$10,000，每個月1號發薪水再存入$10,000。嚴格執行 CFO V3 策略 vs 無腦定投。")
-        
+        st.subheader("📈 策略實驗室 (Strategy Lab)")
+        st.info("💡 模擬情境：過去300天，每月1號存入$10,000。執行 CFO V3 實戰策略 vs 無腦定投。")
         lab_ticker = st.selectbox("選擇回測標的", tickers_list)
-        
         if lab_ticker in df_close.columns:
-            # 執行三種頻率的回測
-            res_1d, roi_1d, strat_roi_1d, inv_1d, end_dca, end_1d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=1)
-            res_3d, roi_3d, strat_roi_3d, inv_3d, _, end_3d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=3)
-            res_7d, roi_7d, strat_roi_7d, inv_7d, _, end_7d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=7)
-            
-            # 顯示結果 Metrics
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("總投入本金", f"${inv_1d:,.0f}")
-            k2.metric("無腦定投 (DCA) 淨值", f"${end_dca:,.0f}", f"ROI: {roi_1d:.1%}")
-            
-            # 策略比較表
-            strat_data = [
-                {"策略頻率": "每日一次 (Daily)", "最終淨值": f"${end_1d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_1d:.1%}", "本益比 (Profit/Cost)": f"{(end_1d-inv_1d)/inv_1d:.2f}"},
-                {"策略頻率": "每3天一次 (3-Day)", "最終淨值": f"${end_3d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_3d:.1%}", "本益比 (Profit/Cost)": f"{(end_3d-inv_3d)/inv_3d:.2f}"},
-                {"策略頻率": "每週一次 (Weekly)", "最終淨值": f"${end_7d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_7d:.1%}", "本益比 (Profit/Cost)": f"{(end_7d-inv_7d)/inv_7d:.2f}"},
-            ]
-            st.table(pd.DataFrame(strat_data))
-            
-            # 畫圖 (比較 1D 策略 vs DCA)
-            st.markdown("#### 📊 資金曲線對決 (Strategy vs DCA)")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['DCA_Value'], name='無腦定投 (DCA)', line=dict(color='gray', dash='dash')))
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Strat_Value'], name='CFO 策略 (Daily)', line=dict(color='#00BFFF', width=2)))
-            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Invested'], name='投入本金', line=dict(color='green', width=1)))
-            st.plotly_chart(fig, use_container_width=True)
+            # 這裡調用 PRO 版本引擎以確保邏輯正確
+            res_1d, r_1d, sr_1d, inv, dca1, st1 = run_strategy_backtest_pro(df_close[lab_ticker].to_frame(name='Close'), df_vol[lab_ticker], 1)
+            res_3d, r_3d, sr_3d, _, _, st3 = run_strategy_backtest_pro(df_close[lab_ticker].to_frame(name='Close'), df_vol[lab_ticker], 3)
+            if res_1d is not None:
+                k1, k2, k3 = st.columns(3)
+                k1.metric("投入本金", f"${inv:,.0f}")
+                k2.metric("DCA 最終值", f"${dca1:,.0f}", f"ROI: {r_1d:.1%}")
+                k3.metric("策略(1D) 最終值", f"${st1:,.0f}", f"ROI: {sr_1d:.1%}")
+                
+                sd = [{"頻率": "每日一次", "最終淨值": f"${st1:,.0f}", "ROI": f"{sr_1d:.1%}", "獲利/成本比": f"{(st1-inv)/inv:.2f}"},
+                      {"頻率": "每3天一次", "最終淨值": f"${st3:,.0f}", "ROI": f"{sr_3d:.1%}", "獲利/成本比": f"{(st3-inv)/inv:.2f}"}]
+                st.table(pd.DataFrame(sd))
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['DCA'], name='無腦定投 (DCA)', line=dict(color='gray', dash='dash')))
+                fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Strat'], name='CFO 策略 (1D)', line=dict(color='#00BFFF', width=2)))
+                st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
     main()
