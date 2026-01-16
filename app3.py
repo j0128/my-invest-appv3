@@ -91,32 +91,30 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
     if ticker not in df_close.columns: return None
     c = df_close[ticker]; h = df_high[ticker]; l = df_low[ticker]
     try:
-        # 1. 技術面預測
+        # 1. 波動率預測 (ATR)
         tr = pd.concat([h-l, (h-c.shift(1)).abs(), (l-c.shift(1)).abs()], axis=1).max(axis=1)
         t_atr = c.iloc[-1] + (tr.rolling(14).mean().iloc[-1] * np.sqrt(days_forecast))
         
+        # 2. 蒙地卡羅概念 (Mean Change)
         mu = c.pct_change().mean()
         t_mc = c.iloc[-1] * ((1 + mu)**days_forecast)
         
+        # 3. 黃金分割 (Fibonacci)
         recent = c.iloc[-60:]
         t_fib = recent.max() + (recent.max() - recent.min()) * 0.618 
         
+        # 4. 隨機森林 AI (Random Forest)
         t_rf = train_rf_model(df_close, ticker, days_forecast)
         
-        # 2. 財務估值 (只保留 DCF)
-        eps = f_data.get('trailingEps') or 0
-        hist_pe = f_data.get('trailingPE') or 20
+        # 5. 分析師平均目標價 (保留作為外部參考)
+        t_fund = f_data.get('Target_Mean')
+
+        # 綜合計算 (移除 DCF/PE)
+        targets = [t for t in [t_atr, t_mc, t_fib, t_fund, t_rf] if t is not None and not pd.isna(t)]
+        t_avg = sum(targets) / len(targets) if targets else None
         
-        # 簡易 DCF 模型 (5年折現)
-        growth = (f_data.get('PEG') or 1.5) / 10 
-        discount_rate = 0.10 
-        
-        if eps > 0:
-            future_eps = eps * ((1 + growth)**5)
-            terminal_val = future_eps * hist_pe
-            t_dcf = terminal_val / ((1 + discount_rate)**5)
-        else:
-            t_dcf = None
+        return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf}
+    except Exception: return None
 
         # 3. 綜合平均 (移除 PE Target)
         targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf, t_dcf] if t is not None and not pd.isna(t)]
@@ -377,7 +375,6 @@ def main():
                 with k3:
                     st.markdown("#### 🐋 籌碼與數據")
                     st.write(f"機構持股: {(adv_data.get(t,{}).get('Inst_Held') or 0)*100:.1f}%")
-                    st.write(f"DCF 估值: ${targets['DCF']:.2f}" if targets and targets.get('DCF') else "N/A")
                     # OBV 圖表
                     fig = go.Figure(); fig.add_trace(go.Scatter(y=df_close[t].iloc[-126:], name='Price'))
                     if obv is not None: fig.add_trace(go.Scatter(y=obv.iloc[-126:], name='OBV', yaxis='y2'))
