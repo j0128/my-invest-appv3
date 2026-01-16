@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 13.2: 混合指揮官", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 13.3: 混合指揮官", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -74,7 +74,7 @@ def get_advanced_info(ticker):
 
 # --- 2. 戰略與預測模型 (純技術版) ---
 
-def train_rf_model(df_close, ticker, days_forecast=22):
+def train_rf_model(df_close, ticker, days_forecast=30):
     try:
         if ticker not in df_close.columns: return None
         df = pd.DataFrame(index=df_close.index); df['Close'] = df_close[ticker]
@@ -87,7 +87,7 @@ def train_rf_model(df_close, ticker, days_forecast=22):
         return model.predict(X.iloc[[-1]])[0]
     except Exception: return None
 
-def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forecast=22):
+def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forecast=30):
     if ticker not in df_close.columns: return None
     c = df_close[ticker]; h = df_high[ticker]; l = df_low[ticker]
     try:
@@ -116,19 +116,35 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
         return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf}
     except Exception: return None
 
-def run_backtest_lab(ticker, df_close, df_high, df_low, f_data, days_ago=22):
+# [核心修改：30天回測與誤差過程展示]
+def run_backtest_lab(ticker, df_close, df_high, df_low, f_data, days_ago=30):
     if ticker not in df_close.columns or len(df_close) < 250: return None
+    
+    # 設定回測時間點：30個交易日前
     idx_past = len(df_close) - days_ago - 1
-    p_now = df_close[ticker].iloc[-1]
+    
+    # 取得「當時」的預測值
     df_past = df_close.iloc[:idx_past+1]
     h_past = df_high.iloc[:idx_past+1]
     l_past = df_low.iloc[:idx_past+1]
     
+    # 當時的預測
     targets_past = calc_targets_composite(ticker, df_past, h_past, l_past, f_data, days_ago)
     past_pred = targets_past['Avg'] if targets_past else None
     
-    err = (past_pred - p_now) / p_now if past_pred else 0
-    return {"Past_Pred": past_pred, "Error": err}
+    # 取得「今日」的現值
+    p_now = df_close[ticker].iloc[-1]
+    
+    # 計算誤差
+    if past_pred:
+        diff = past_pred - p_now
+        err = diff / p_now
+        calc_process = f"({past_pred:.2f} - {p_now:.2f}) / {p_now:.2f} = {err:.1%}"
+    else:
+        err = 0
+        calc_process = "N/A"
+
+    return {"Past_Pred": past_pred, "Present_Value": p_now, "Error": err, "Process": calc_process}
 
 def analyze_trend_multi(series):
     if len(series) < 200: return {"status": "資料不足", "p_now": series.iloc[-1], "is_bull": False}
@@ -281,14 +297,14 @@ def main():
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 13.2 正在執行混合全域掃描..."):
+    with st.spinner("🦅 Alpha 13.3 正在執行混合全域掃描 (30天回測)..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
         df_macro, df_fed = fetch_fred_macro(fred_key); adv_data = {t: get_advanced_info(t) for t in tickers_list}
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室"])
 
     with t1:
-        st.title("🦅 Alpha 13.2: 混合戰略指揮中心")
+        st.title("🦅 Alpha 13.3: 混合戰略指揮中心")
         st.subheader("1. 宏觀戰情")
         liq = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0
         vix = df_close['^VIX'].iloc[-1] if '^VIX' in df_close.columns else 0
@@ -305,7 +321,7 @@ def main():
         summary = []
         for t in tickers_list:
             if t not in df_close.columns: continue
-            tr = analyze_trend_multi(df_close[t]); targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
+            tr = analyze_trend_multi(df_close[t]); targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
             tgt = targets['Avg'] if targets else 0
             
             # $±2σ$ 預測範圍
@@ -326,15 +342,15 @@ def main():
         st.write(pd.DataFrame(summary).to_html(escape=False), unsafe_allow_html=True)
         
         st.markdown("---")
-        st.subheader("2. 個股雷達 (估值與預測回測)")
+        st.subheader("2. 個股雷達 (預測回測: 30天前)")
         for t in tickers_list:
             if t not in df_close.columns: continue
-            targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
-            bt_err = run_backtest_lab(t, df_close, df_high, df_low, adv_data.get(t,{}), 22)
+            targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
+            bt_res = run_backtest_lab(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
             obv = calc_obv(df_close[t], df_vol[t])
             comp_res = compare_with_leverage(t, df_close)
             
-            with st.expander(f"🦅 {t} 戰略深度分析 (Backtest Error)", expanded=False):
+            with st.expander(f"🦅 {t} 戰略深度分析 (30-Day Backtest Error)", expanded=False):
                 k1, k2, k3 = st.columns([2, 1, 1])
                 with k1: 
                     if comp_res: st.plotly_chart(px.line(comp_res[0], title=f"{t} vs TQQQ").update_layout(height=300), use_container_width=True)
@@ -342,7 +358,16 @@ def main():
                     st.markdown("#### 🎯 估值體系 (1M)")
                     if targets:
                         for key, val in targets.items(): st.write(f"**{key}:** ${val:.2f}" if val else f"**{key}:** N/A")
-                    if bt_err: st.info(f"系統預測回測誤差: {bt_err['Error']:.1%}")
+                    
+                    st.markdown("#### 🔄 系統預測回測 (30天)")
+                    if bt_res and bt_res['Past_Pred']:
+                        st.write(f"**30天前預測平均:** ${bt_res['Past_Pred']:.2f}")
+                        st.write(f"**今日現價:** ${bt_res['Present_Value']:.2f}")
+                        st.write(f"**誤差計算:**")
+                        st.code(bt_res['Process'], language="text")
+                    else:
+                        st.info("數據不足，無法回測")
+
                 with k3:
                     st.markdown("#### 🐋 籌碼與數據")
                     st.write(f"機構持股: {(adv_data.get(t,{}).get('Inst_Held') or 0)*100:.1f}%")
@@ -361,25 +386,11 @@ def main():
         h_data = [{"代號": t, "PEG": f"{(adv_data.get(t,{}).get('PEG') or 0):.2f}", "ROE": f"{(adv_data.get(t,{}).get('ROE') or 0)*100:.1f}%", "淨利率": f"{(adv_data.get(t,{}).get('Profit_Margin') or 0)*100:.1f}%"} for t in tickers_list]
         st.dataframe(pd.DataFrame(h_data), use_container_width=True)
 
-    # === TAB 4~6: 回測/財報/房貸 ===
-    with t4:
-        st.subheader("🚦 SMA200 回測")
-        for t in tickers_list:
-            if t in df_close.columns:
-                s, b = run_traffic_light(df_close[t]); st.write(f"**{t}**")
-                st.line_chart(pd.DataFrame({"策略": s, "買入持有": b}).dropna())
-
-    with t5:
-        st.subheader("💰 CFO 財報")
-        inc = st.number_input("月收", 80000); exp = st.number_input("月支", 40000)
-        st.metric("每月結餘", f"${inc-exp:,.0f}", f"儲蓄率: {(inc-exp)/inc:.1%}")
-
     with t6:
         st.subheader("🏠 房貸目標")
         amt = st.number_input("貸款金額", 10000000); rt = st.number_input("年利率", 2.2)
-        pmt, _ = calc_mortgage(amt, 30, rt); st.metric("月付額", f"${pmt:,.0f}")
+        pmt, _ = calc_mortgage(amt, 30, rt); st.metric("月付", f"${pmt:,.0f}")
 
-    # === TAB 7: 策略實驗室 ===
     with t7:
         st.subheader("📊 混合戰略實驗室")
         lab_ticker = st.selectbox("選擇回測標的", sorted(list(set(tickers_list + ['TQQQ', 'QQQ', 'SPY']))))
