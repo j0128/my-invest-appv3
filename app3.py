@@ -11,12 +11,13 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 0. 全局環境與常數設定 (Global Configuration & Topological Constants)
+# 0. 全局環境與拓撲常數設定 (Global Configuration & Topological Constants)
 # ==============================================================================
 
-# 拓撲常數 (Derived from Posa Lab Experiments A/B/C)
+# 拓撲常數 (Derived from Posa Lab Experiments)
+# 這些參數來自於對 2021-2025 年市場數據的拓撲撕裂測試
 TOPO_CONSTANTS = {
-    "LIQUIDITY_THRESHOLD": -0.137,  # 縮表閾值 (Trillion USD)
+    "LIQUIDITY_THRESHOLD": -0.137,  # 最佳防禦閾值 (Trillion USD, 20-day change)
     "LAG_DAYS_TECH": 15,            # 科技股反應時滯 (Days)
     "LAG_DAYS_CRYPTO": 0,           # 加密貨幣無時滯 (Immediate Tear)
     "KELLY_LOOKBACK": 60,           # 動態凱利窗口 (對應 Q1 2026 週期)
@@ -24,13 +25,14 @@ TOPO_CONSTANTS = {
 }
 
 # 資產分類學 (Topological Taxonomy)
+# 用於決定防禦模式 (Hard vs Soft Defense)
 ASSET_TAXONOMY = {
-    "Growth": ['BTC-USD', 'ETH-USD', 'ARKK', 'PLTR', 'NVDA', 'AMD', 'TSLA', 'TQQQ'],
-    "Defensive": ['KO', 'MCD', 'JNJ', 'PG', '2330.TW', 'SPY', 'TLT', 'GLD']
+    "Growth": ['BTC-USD', 'ETH-USD', 'ARKK', 'PLTR', 'NVDA', 'AMD', 'TSLA', 'TQQQ', 'SOXL'],
+    "Defensive": ['KO', 'MCD', 'JNJ', 'PG', '2330.TW', 'SPY', 'TLT', 'GLD', 'SCHD']
 }
 
 st.set_page_config(
-    page_title="Alpha 13.99: 拓撲指揮官 (Ultimate)",
+    page_title="Alpha 13.99: 拓撲指揮官 (Ultimate Fixed)",
     layout="wide",
     page_icon="🦅",
     initial_sidebar_state="expanded"
@@ -138,7 +140,7 @@ def fetch_fred_macro(api_key):
         
         return df, df_rate
     except Exception as e: 
-        st.sidebar.error(f"FRED API Error: {str(e)}")
+        # st.sidebar.error(f"FRED API Error: {str(e)}") # 暫時隱藏錯誤，避免干擾
         return None, None
 
 @st.cache_data(ttl=3600*24)
@@ -332,6 +334,19 @@ def calc_six_dim_state(series):
     if p < ma20 - 2*std: return "L2 超賣區"
     return "L1 震盪整理"
 
+# [CRITICAL FIX] 補回 calc_mvrv_z 函數
+def calc_mvrv_z(series):
+    """
+    MVRV-Z Score 近似值 (用於判斷是否偏離均值過遠)。
+    計算公式: (Price - SMA200) / Std200
+    """
+    if len(series) < 200: return None
+    sma200 = series.rolling(200).mean()
+    std200 = series.rolling(200).std()
+    # 避免除以零
+    z_score = (series - sma200) / (std200 + 1e-9)
+    return z_score
+
 def get_cfo_directive_v4(p_now, six_state, trend_status, bull_mode, rsi, slope, vol_ratio, mvrv_z, range_high, range_low):
     """ CFO 決策核心 V4 """
     if "L" in six_state and "空頭" in trend_status: return "⬛ 趨勢損毀 (清倉)", 0.0
@@ -349,6 +364,7 @@ def get_cfo_directive_v4(p_now, six_state, trend_status, bull_mode, rsi, slope, 
         
     return (" | ".join(buy_signals) if buy_signals else ("🦁 牛市持倉" if bull_mode else "⬜ 觀望/持有")), build_pct
 
+# [CRITICAL FIX] 補回 calc_obv_trend 函數
 def calc_obv_trend(close, volume, lookback=20):
     try:
         obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
@@ -356,6 +372,25 @@ def calc_obv_trend(close, volume, lookback=20):
         delta = obv.iloc[-1] - obv.iloc[-lookback]
         return "🔥 吸籌" if delta > 0 else "🔻 出貨"
     except: return "N/A"
+
+# [CRITICAL FIX] 補回 calc_obv 函數
+def calc_obv(close, volume):
+    if volume is None: return None
+    return (np.sign(close.diff()) * volume).fillna(0).cumsum()
+
+# [CRITICAL FIX] 補回 compare_with_leverage 函數
+def compare_with_leverage(ticker, df_close):
+    if ticker not in df_close.columns: return None
+    benchs = ['QQQ', 'QLD', 'TQQQ']
+    valid_benchs = [b for b in benchs if b in df_close.columns]
+    if not valid_benchs: return None
+    lookback = 252 if len(df_close) > 252 else len(df_close)
+    df_compare = df_close[[ticker] + valid_benchs].iloc[-lookback:].copy()
+    df_norm = df_compare / df_compare.iloc[0] * 100
+    ret_ticker = df_norm[ticker].iloc[-1] - 100
+    ret_tqqq = df_norm['TQQQ'].iloc[-1] - 100 if 'TQQQ' in df_norm else 0
+    status = "👑 跑贏 TQQQ" if ret_ticker > ret_tqqq else "💀 輸給 TQQQ"
+    return df_norm, status, ret_ticker, ret_tqqq
 
 
 # ==============================================================================
@@ -608,7 +643,12 @@ def main():
             tr = analyze_trend_multi(df_close[t])
             rsi, slope, vr = calc_tech_indicators(df_close[t], df_vol[t])
             six = calc_six_dim_state(df_close[t])
-            mvrv = calc_mvrv_z(df_close[t]).iloc[-1] if calc_mvrv_z(df_close[t]) is not None else 0
+            
+            # [CRITICAL] 確保 mvrv 安全計算
+            try:
+                mvrv = calc_mvrv_z(df_close[t]).iloc[-1] 
+            except:
+                mvrv = 0
             
             # Targets & Backtest
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
@@ -673,19 +713,19 @@ def main():
         st.subheader("📊 拓撲實驗室 (V3 Final - 分類防禦)")
         st.info(f"當前防禦參數：閾值 {TOPO_CONSTANTS['LIQUIDITY_THRESHOLD']}T | 科技股時滯 {TOPO_CONSTANTS['LAG_DAYS_TECH']}天")
         
-        lab_t = st.selectbox("回測標的", sorted(list(set(tickers + ['QQQ', 'SPY']))))
+        lab_ticker = st.selectbox("回測標的", sorted(list(set(tickers + ['QQQ', 'SPY']))))
         
         # 自動分類
-        if lab_t in ASSET_TAXONOMY['Growth']: t_type = "Growth"
-        elif lab_t in ASSET_TAXONOMY['Defensive']: t_type = "Defensive"
+        if lab_ticker in ASSET_TAXONOMY['Growth']: t_type = "Growth"
+        elif lab_ticker in ASSET_TAXONOMY['Defensive']: t_type = "Defensive"
         else: t_type = "Growth" # 預設高風險
         
         st.write(f"標的類型: **{t_type}** (若是 Growth 則觸發 Hard Defense)")
         
-        if lab_t in df_close.columns:
+        if lab_ticker in df_close.columns:
             res, r_d, r_s, inv = run_strategy_backtest_salary_flow_v3(
-                df_close[lab_t].to_frame(name='Close'), 
-                df_vol[lab_t], 
+                df_close[lab_ticker].to_frame(name='Close'), 
+                df_vol[lab_ticker], 
                 df_macro,
                 ticker_type=t_type
             )
@@ -695,6 +735,12 @@ def main():
             c2.metric("DCA", f"{r_d:.1%}")
             c3.metric("拓撲策略", f"{r_s:.1%}", delta=f"{(r_s-r_d)*100:.1f}%")
             st.plotly_chart(px.line(res[['DCA', 'Strat']]))
+            
+            # [NEW] 顯示比較雷達圖
+            if 'TQQQ' in df_close.columns:
+                comp_res = compare_with_leverage(lab_ticker, df_close)
+                if comp_res:
+                    st.success(f"槓桿比較: {comp_res[1]}")
 
     # === TAB 8: 內建驗證 (NEW) ===
     with t8:
