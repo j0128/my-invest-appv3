@@ -967,7 +967,7 @@ def main():
             # 執行回測邏輯
             res, r_dca, r_strat, inv, dca_f, strat_f = run_strategy_backtest_salary_flow_v2(
                 df_close[lab_ticker].to_frame(name='Close'), 
-                df_vol[lab_ticker]
+                df_vol[lab_ticker],
                 df_macro # <--- 新增這個參數
             )
             
