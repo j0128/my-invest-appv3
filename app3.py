@@ -469,7 +469,6 @@ def calc_mortgage(amt, yrs, rate):
     return pmt, pmt * m - amt
 
     with t7:
-    with t7:
         st.subheader("📈 買入賣出策略實驗室 (Strategy Lab)")
         st.info("💡 模擬情境：過去300天，初始本金$10,000，每個月1號發薪水再存入$10,000。嚴格執行 CFO V3 策略 vs 無腦定投。")
         
