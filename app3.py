@@ -227,70 +227,33 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
     except Exception: 
         return None
 
-def run_backtest_lab_v2(ticker, df_close, df_high, df_low, df_macro, f_data, days_ago=30):
+def run_backtest_lab(ticker, df_close, df_high, df_low, f_data, days_ago=30):
     """
-    拓撲回測實驗室 V2 (Topological Backtest Lab):
-    引入宏觀流動性 (df_macro) 作為全域截面修正。
-    驗證: "在考慮 Fed 流動性狀態下，30天前的預測是否準確?"
+    歷史預測回測實驗室。
+    驗證 30 天前的模型預測與今日現價的誤差 $H^1$。
     """
-    # 1. 基本檢查
     if ticker not in df_close.columns or len(df_close) < 250: return None
     
-    # 2. 定位時空坐標 (30天前)
     idx_past = len(df_close) - days_ago - 1
-    date_past = df_close.index[idx_past]
-    p_past = df_close[ticker].iloc[idx_past]
     p_now = df_close[ticker].iloc[-1]
     
-    # 3. 獲取當時的 "全域流動性狀態" (Global Section at t-30)
-    # 這裡我們看過去 20 天的流動性變化
-    try:
-        # 找到最接近 date_past 的宏觀數據
-        macro_idx = df_macro.index.get_indexer([date_past], method='ffill')[0]
-        liq_current = df_macro['Net_Liquidity'].iloc[macro_idx]
-        liq_prev = df_macro['Net_Liquidity'].iloc[macro_idx - 20]
-        liq_change = liq_current - liq_prev
-        
-        is_contraction = liq_change < -0.05 # 縮表閾值 (例如減少500億)
-        macro_status = "🔻 緊縮" if is_contraction else "💧 寬鬆"
-    except:
-        is_contraction = False
-        macro_status = "⚪ 中性"
-
-    # 4. 計算 "原始" 技術目標價 (Valuation Sheaf)
+    # 切片出過去的資料子集
     df_past = df_close.iloc[:idx_past+1]
     h_past = df_high.iloc[:idx_past+1]
     l_past = df_low.iloc[:idx_past+1]
     
-    raw_targets = calc_targets_composite(ticker, df_past, h_past, l_past, f_data, days_ago)
-    raw_pred = raw_targets['Avg'] if raw_targets else None
+    # 使用過去資料重新計算目標價
+    targets_past = calc_targets_composite(ticker, df_past, h_past, l_past, f_data, days_ago)
+    past_pred = targets_past['Avg'] if targets_past else None
     
-    # 5. 應用 "拓撲修正" (Topological Correction)
-    # 如果當時流動性在緊縮，模型不應該樂觀看漲。
-    # 修正邏輯：如果縮表，將目標價強制修正為 "防禦性價格" (例如當下的 SMA20 或更低)
-    final_pred = raw_pred
-    note = ""
-    
-    if is_contraction and raw_pred and raw_pred > p_past:
-        # 拓撲矛盾：流動性收縮，但技術面看漲 -> 視為 "假突破" 風險
-        final_pred = raw_pred * 0.9 # 強制下修預期
-        note = "(因緊縮下修)"
-        
-    # 6. 計算誤差
-    if final_pred:
-        diff = final_pred - p_now
+    if past_pred:
+        diff = past_pred - p_now
         err = diff / p_now
-        calc_process = f"[{macro_status}] 預測: {final_pred:.2f} {note} vs 現價: {p_now:.2f} | 誤差: {err:.1%}"
+        calc_process = f"({past_pred:.2f} - {p_now:.2f}) / {p_now:.2f} = {err:.1%}"
     else:
         err = 0; calc_process = "N/A"
         
-    return {
-        "Past_Pred": final_pred, 
-        "Present_Value": p_now, 
-        "Error": err, 
-        "Process": calc_process,
-        "Macro_State": macro_status
-    }
+    return {"Past_Pred": past_pred, "Present_Value": p_now, "Error": err, "Process": calc_process}
 
 def analyze_trend_multi(series):
     """
@@ -563,31 +526,20 @@ def calc_mortgage_advanced(principal, rate, years, extra_monthly):
 # 4. 回測實驗室 (Strategy Labs)
 # ==========================================
 
-def run_strategy_backtest_salary_flow_v3(df_in, vol_in, df_macro):
+def run_strategy_backtest_salary_flow_v2(df_in, vol_in):
     """
-    V3 拓撲增強版回測: 
-    引入 FRED 宏觀流動性作為「全域過濾器 (Global Filter)」。
-    當流動性收縮時，強制執行防禦策略。
+    薪資現金流 + 混合策略回測。
+    比較 DCA (定期定額) vs Alpha 策略。
     """
     df = df_in.copy()
     df['Volume'] = vol_in
+    if len(df) > 300: df = df.iloc[-300:]
     
-    # --- 1. 數據對齊 (Data Alignment) ---
-    # 將宏觀數據對齊到日線 (使用 ffill 避免前視偏誤)
-    # 確保 df_macro 的索引也是 datetime
-    if df_macro is not None:
-        # 計算流動性趨勢 (20日變化)
-        macro_signal = df_macro['Net_Liquidity'].diff(20).reindex(df.index).ffill()
-    else:
-        macro_signal = pd.Series(0, index=df.index) # 如果沒數據就設為中性
-
-    if len(df) > 500: df = df.iloc[-500:] # 取近兩年
-    macro_signal = macro_signal.iloc[-len(df):] # 切齊長度
-
-    # --- 2. 技術指標 ---
+    # 計算指標
     df['SMA20'] = df['Close'].rolling(20).mean()
     df['SMA200'] = df['Close'].rolling(200).mean()
     df['Upper'] = df['SMA20'] + 2 * df['Close'].rolling(20).std()
+    df['Lower'] = df['SMA20'] - 2 * df['Close'].rolling(20).std()
     
     # RSI
     delta = df['Close'].diff()
@@ -595,7 +547,7 @@ def run_strategy_backtest_salary_flow_v3(df_in, vol_in, df_macro):
     down = -1 * delta.clip(upper=0).abs()
     df['RSI'] = 100 - (100 / (1 + up.ewm(13).mean() / down.ewm(13).mean()))
     
-    # --- 3. 回測迴圈 ---
+    # 初始化帳戶
     cash_dca = 0; shares_dca = 0
     cash_strat = 0; shares_strat = 0
     invested = 0
@@ -605,14 +557,15 @@ def run_strategy_backtest_salary_flow_v3(df_in, vol_in, df_macro):
     for i in range(len(df)):
         p = df['Close'].iloc[i]
         date = df.index[i]
-        liq_trend = macro_signal.iloc[i] # 獲取當下的流動性動能 (+為擴張, -為收縮)
         
-        # 每月發薪日注入資金
+        # 每月發薪日注入資金 (假設每個月第一筆資料為發薪日)
         if date.month != last_month:
-            cash_dca += 10000; cash_strat += 10000; invested += 10000
+            cash_dca += 10000
+            cash_strat += 10000
+            invested += 10000
             last_month = date.month
             
-            # DCA: 無腦買入
+            # DCA: 立即買入
             buy_dca = cash_dca // p
             shares_dca += buy_dca
             cash_dca -= buy_dca * p
@@ -620,42 +573,26 @@ def run_strategy_backtest_salary_flow_v3(df_in, vol_in, df_macro):
         if i > 20:
             ma20 = df['SMA20'].iloc[i]
             ma200 = df['SMA200'].iloc[i]
+            bull = (p > ma200) and (ma200 > df['SMA200'].iloc[i-5]) and (p > ma20)
             rsi = df['RSI'].iloc[i]
+            up_band = df['Upper'].iloc[i]
+            lw_band = df['Lower'].iloc[i]
             
-            # --- 拓撲決策核心 (Topological Core) ---
-            
-            # 狀態 A: 全域流動性危機 (Global Crunch)
-            # 條件: 流動性在收縮 (liq_trend < 0)
-            if liq_trend < -0.05: # 設定一個閾值 (例如縮表超過 500億)
-                # 策略: 極度防禦 (只賣不買，或者現金為王)
-                risk_mode = "DEFENSIVE"
-            else:
-                # 策略: 正常操作
-                risk_mode = "NORMAL"
-
-            # 賣出邏輯
+            # 賣出邏輯 (Risk Off)
             sell_pct = 0
-            if risk_mode == "DEFENSIVE":
-                # 在流動性危機中，只要跌破月線就砍，絕不留戀
-                if p < ma20: sell_pct = 1.0 
-            else:
-                # 正常模式：跌破年線或過熱才賣
-                if p < ma20 and p < ma200: sell_pct = 1.0
-                elif rsi > 80: sell_pct = 0.5
-
-            # 執行賣出
+            if p < ma20 and p < ma200: sell_pct = 1.0 # 趨勢壞，清倉
+            elif p > up_band * 1.05 or rsi > (85 if bull else 80): sell_pct = 0.5 # 過熱，減碼
+            
             if sell_pct > 0 and shares_strat > 0:
                 s_amt = int(shares_strat * sell_pct)
                 shares_strat -= s_amt
                 cash_strat += s_amt * p
                 
-            # 買入邏輯
-            # 關鍵差異：如果處於 DEFENSIVE 模式，禁止買入 (Veto)
-            if sell_pct == 0 and risk_mode == "NORMAL":
-                bull = (p > ma200)
-                buy_pct = 0.8 if bull else 0.2
+            # 買入邏輯 (Risk On)
+            if sell_pct == 0:
+                buy_pct = 0.8 if bull else (0.3 if p < lw_band else 0)
                 
-                if cash_strat > 100:
+                if buy_pct > 0 and cash_strat > 100:
                     b_val = cash_strat * buy_pct
                     buy = b_val // p
                     shares_strat += buy
@@ -664,11 +601,12 @@ def run_strategy_backtest_salary_flow_v3(df_in, vol_in, df_macro):
         history.append({
             "Date": date, 
             "DCA": cash_dca + shares_dca * p, 
-            "Strat": cash_strat + shares_strat * p,
-            "Liquidity_Trend": liq_trend # 記錄流動性狀態以便觀察
+            "Strat": cash_strat + shares_strat * p, 
+            "Inv": invested
         })
         
     res = pd.DataFrame(history).set_index("Date")
+    
     final_dca = (res['DCA'].iloc[-1]-invested)/invested
     final_strat = (res['Strat'].iloc[-1]-invested)/invested
     
@@ -835,12 +773,7 @@ def main():
         for t in tickers_list:
             if t not in df_close.columns: continue
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
-            bt_res = run_backtest_lab_v2(
-                t, df_close, df_high, df_low,
-                df_macro,
-                adv_data.get(t,{}),
-                30
-            )
+            bt_res = run_backtest_lab(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
             obv = calc_obv(df_close[t], df_vol[t])
             comp_res = compare_with_leverage(t, df_close)
             
@@ -967,8 +900,7 @@ def main():
             # 執行回測邏輯
             res, r_dca, r_strat, inv, dca_f, strat_f = run_strategy_backtest_salary_flow_v2(
                 df_close[lab_ticker].to_frame(name='Close'), 
-                df_vol[lab_ticker],
-                df_macro # <--- 新增這個參數
+                df_vol[lab_ticker]
             )
             
             c1, c2, c3 = st.columns(3)
