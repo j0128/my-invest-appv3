@@ -180,6 +180,123 @@ def compare_with_leverage(ticker, df_close):
     df_norm = df_compare / df_compare.iloc[0] * 100; ret_ticker = df_norm[ticker].iloc[-1] - 100; ret_tqqq = df_norm['TQQQ'].iloc[-1] - 100 if 'TQQQ' in df_norm else 0
     return df_norm, "👑 贏 TQQQ" if ret_ticker > ret_tqqq else "💀 輸 TQQQ", ret_ticker, ret_tqqq
 
+
+# [NEW] 策略實驗室回測引擎
+def run_strategy_backtest(df_in, frequency_days=1):
+    """
+    回測邏輯：
+    1. 起始資金 10000，每月1號 +10000。
+    2. DCA 組：錢進來直接買。
+    3. 策略組：根據頻率檢測訊號 (CFO V3 邏輯)，決定買賣比例。
+       - 買進：根據 Cash 的 % (20%, 50%, 80%)
+       - 賣出：根據 持倉 的 % (33%, 50%, 100%)
+    """
+    df = df_in.copy()
+    # 預先計算指標以加速
+    df['SMA20'] = df['Close'].rolling(20).mean()
+    df['SMA200'] = df['Close'].rolling(200).mean()
+    df['STD20'] = df['Close'].rolling(20).std()
+    df['Upper'] = df['SMA20'] + 2 * df['STD20']
+    df['Lower'] = df['SMA20'] - 2 * df['STD20']
+    
+    # RSI
+    delta = df['Close'].diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    df['RSI'] = 100 - (100 / (1 + up.ewm(com=13).mean() / down.ewm(com=13).mean()))
+    
+    # Slope
+    df['Slope'] = (df['SMA20'] - df['SMA20'].shift(5)) / df['SMA20'].shift(5)
+
+    # 初始化
+    cash_dca = 0; shares_dca = 0; invested_dca = 0
+    cash_strat = 0; shares_strat = 0; invested_strat = 0
+    
+    history = []
+    last_month = -1
+    
+    # 僅跑最後 300 天
+    if len(df) > 300: df = df.iloc[-300:]
+    
+    for i in range(len(df)):
+        date = df.index[i]
+        price = df['Close'].iloc[i]
+        
+        # 1. 每月發薪水 (每月第1天或最接近的一天)
+        if date.month != last_month:
+            # Inject Capital
+            cash_dca += 10000
+            invested_dca += 10000
+            
+            cash_strat += 10000
+            invested_strat += 10000
+            
+            # DCA 策略：有錢就買
+            can_buy = cash_dca // price
+            if can_buy > 0:
+                shares_dca += can_buy
+                cash_dca -= can_buy * price
+            
+            last_month = date.month
+        
+        # 2. 策略組交易 (按頻率)
+        if i % frequency_days == 0 and i > 20: # 確保有均線數據
+            # 判斷訊號 (簡化版 V3 邏輯，避免 look-ahead)
+            p = price; ma20 = df['SMA20'].iloc[i]; upper = df['Upper'].iloc[i]; lower = df['Lower'].iloc[i]
+            ma200 = df['SMA200'].iloc[i]; rsi = df['RSI'].iloc[i]; slope = df['Slope'].iloc[i]
+            
+            # 賣訊
+            sell_pct = 0
+            if p < ma20 and ma200 > 0 and p < ma200: sell_pct = 1.0 # 趨勢損毀
+            elif p > upper * 1.05 or rsi > 80: sell_pct = 0.5 # 極限噴出
+            elif p > upper: sell_pct = 0.33 # 過熱
+            
+            if sell_pct > 0 and shares_strat > 0:
+                sell_amt = int(shares_strat * sell_pct)
+                if sell_amt > 0:
+                    shares_strat -= sell_amt
+                    cash_strat += sell_amt * price
+            
+            # 買訊
+            buy_pct_cash = 0
+            # 抄底
+            if p < lower: buy_pct_cash = 0.3
+            # 順勢
+            elif p > ma20 and p > ma200: # 簡化：多頭
+                if slope > 0.01: buy_pct_cash = 0.8 # 加速
+                elif slope > 0: buy_pct_cash = 0.5 # 確立
+                else: buy_pct_cash = 0.2 # 試單
+            
+            if buy_pct_cash > 0 and cash_strat > 0:
+                amount_to_spend = cash_strat * buy_pct_cash
+                can_buy = amount_to_spend // price
+                if can_buy > 0:
+                    shares_strat += can_buy
+                    cash_strat -= can_buy * price
+
+        # 記錄淨值
+        val_dca = cash_dca + shares_dca * price
+        val_strat = cash_strat + shares_strat * price
+        history.append({
+            "Date": date,
+            "DCA_Value": val_dca,
+            "Strat_Value": val_strat,
+            "Invested": invested_strat
+        })
+        
+    res_df = pd.DataFrame(history).set_index("Date")
+    
+    # 計算最終指標
+    final_dca = res_df['DCA_Value'].iloc[-1]
+    final_strat = res_df['Strat_Value'].iloc[-1]
+    invested = res_df['Invested'].iloc[-1]
+    
+    roi_dca = (final_dca - invested) / invested
+    roi_strat = (final_strat - invested) / invested
+    
+    return res_df, roi_dca, roi_strat, invested, final_dca, final_strat
+
+
 # [STRATEGY ENGINE]
 def run_strategy_backtest_pro(df_in, vol_in, frequency_days=1):
     df = df_in.copy(); df['Volume'] = vol_in
@@ -248,7 +365,7 @@ def main():
 
     if df_close.empty: st.error("❌ 無數據"); st.stop()
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室"])
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室回測引擎"])
 
     with t1:
         st.subheader("1. 宏觀與總表")
@@ -350,16 +467,40 @@ def calc_mortgage(amt, yrs, rate):
     else:
         pmt = amt / m
     return pmt, pmt * m - amt
+
     with t7:
-        st.subheader("📊 策略實驗室")
-        avail = [c for c in df_close.columns if not (c.startswith('^') or c.endswith('=F'))]
-        lab_t = st.selectbox("選擇實驗標的", sorted(list(set(avail + ['TQQQ', 'QQQ', 'SPY']))))
-        if lab_t in df_close.columns:
-            res1, r1, sr1, inv, dca1, st1 = run_strategy_backtest_pro(df_close[lab_t].to_frame(name='Close'), df_vol[lab_t], 1)
-            res3, r3, sr3, _, _, st3 = run_strategy_backtest_pro(df_close[lab_t].to_frame(name='Close'), df_vol[lab_t], 3)
-            if res1 is not None:
-                k1, k2, k3 = st.columns(3); k1.metric("投入本金", f"${inv:,.0f}"); k2.metric("DCA 淨值", f"${dca1:,.0f}", f"{r1:.1%}"); k3.metric("策略(1D) 淨值", f"${st1:,.0f}", f"{sr1:.1%}")
-                fig = go.Figure(); fig.add_trace(go.Scatter(x=res1.index, y=res1['DCA'], name='DCA', line=dict(color='gray', dash='dash'))); fig.add_trace(go.Scatter(x=res1.index, y=res1['Strat'], name='CFO Strategy', line=dict(color='#00BFFF'))); st.plotly_chart(fig, use_container_width=True)
+    with t7:
+        st.subheader("📈 買入賣出策略實驗室 (Strategy Lab)")
+        st.info("💡 模擬情境：過去300天，初始本金$10,000，每個月1號發薪水再存入$10,000。嚴格執行 CFO V3 策略 vs 無腦定投。")
+        
+        lab_ticker = st.selectbox("選擇回測標的", tickers_list)
+        
+        if lab_ticker in df_close.columns:
+            # 執行三種頻率的回測
+            res_1d, roi_1d, strat_roi_1d, inv_1d, end_dca, end_1d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=1)
+            res_3d, roi_3d, strat_roi_3d, inv_3d, _, end_3d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=3)
+            res_7d, roi_7d, strat_roi_7d, inv_7d, _, end_7d = run_strategy_backtest(df_close[lab_ticker].to_frame(name='Close'), frequency_days=7)
+            
+            # 顯示結果 Metrics
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("總投入本金", f"${inv_1d:,.0f}")
+            k2.metric("無腦定投 (DCA) 淨值", f"${end_dca:,.0f}", f"ROI: {roi_1d:.1%}")
+            
+            # 策略比較表
+            strat_data = [
+                {"策略頻率": "每日一次 (Daily)", "最終淨值": f"${end_1d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_1d:.1%}", "本益比 (Profit/Cost)": f"{(end_1d-inv_1d)/inv_1d:.2f}"},
+                {"策略頻率": "每3天一次 (3-Day)", "最終淨值": f"${end_3d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_3d:.1%}", "本益比 (Profit/Cost)": f"{(end_3d-inv_3d)/inv_3d:.2f}"},
+                {"策略頻率": "每週一次 (Weekly)", "最終淨值": f"${end_7d:,.0f}", "總報酬率 (ROI)": f"{strat_roi_7d:.1%}", "本益比 (Profit/Cost)": f"{(end_7d-inv_7d)/inv_7d:.2f}"},
+            ]
+            st.table(pd.DataFrame(strat_data))
+            
+            # 畫圖 (比較 1D 策略 vs DCA)
+            st.markdown("#### 📊 資金曲線對決 (Strategy vs DCA)")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['DCA_Value'], name='無腦定投 (DCA)', line=dict(color='gray', dash='dash')))
+            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Strat_Value'], name='CFO 策略 (Daily)', line=dict(color='#00BFFF', width=2)))
+            fig.add_trace(go.Scatter(x=res_1d.index, y=res_1d['Invested'], name='投入本金', line=dict(color='green', width=1)))
+            st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
     main()
