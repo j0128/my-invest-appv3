@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 0. 全局設定 ---
-st.set_page_config(page_title="Alpha 13.4: 真．CFO 財務版", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Alpha 13.6: 混合指揮官", layout="wide", page_icon="🦅")
 
 st.markdown("""
 <style>
@@ -73,7 +73,7 @@ def get_advanced_info(ticker):
         }
     except Exception: return {}
 
-# --- 2. 戰略與預測模型 (純技術) ---
+# --- 2. 戰略與預測模型 ---
 
 def train_rf_model(df_close, ticker, days_forecast=30):
     try:
@@ -160,7 +160,7 @@ def calc_dynamic_kelly(series, lookback=63):
         avg_win = wins.mean(); avg_loss = abs(losses.mean())
         if avg_loss == 0: return 0.5
         kelly = win_rate - ((1 - win_rate) / (avg_win / avg_loss))
-        return max(0.0, min(1.0, kelly * 0.5)) # Half-Kelly
+        return max(0.0, min(1.0, kelly * 0.5)) 
     except: return 0.0
 
 def calc_mvrv_z(series):
@@ -190,6 +190,15 @@ def calc_six_dim_state(series):
     if p < lw: return "L2 超賣區"
     return "L1 震盪整理"
 
+def calc_obv_trend(close, volume, lookback=20):
+    try:
+        obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
+        if len(obv) < lookback: return "N/A"
+        delta = obv.iloc[-1] - obv.iloc[-lookback]
+        if delta > 0: return "🔥 吸籌 (買入)"
+        else: return "🔻 出貨 (賣出)"
+    except: return "N/A"
+
 def calc_obv(close, volume):
     if volume is None: return None
     return (np.sign(close.diff()) * volume).fillna(0).cumsum()
@@ -215,7 +224,7 @@ def calc_coast_fire(current_age, retire_age, current_net_worth, monthly_saving, 
     
     data = []
     balance = current_net_worth
-    fire_number = (monthly_saving * 12 * 25) # 粗估: 年支出 * 25
+    fire_number = (monthly_saving * 12 * 25) 
     
     for i in range(years + 1):
         age = current_age + i
@@ -229,15 +238,12 @@ def calc_mortgage_advanced(principal, rate, years, extra_monthly):
     n_months = years * 12
     monthly_payment = principal * (r * (1 + r)**n_months) / ((1 + r)**n_months - 1)
     
-    # 正常還款
     total_interest_normal = (monthly_payment * n_months) - principal
     
-    # 加速還款模擬
     balance = principal
     total_interest_acc = 0
     months_acc = 0
     
-    data = []
     while balance > 0:
         interest = balance * r
         principal_paid = monthly_payment - interest + extra_monthly
@@ -246,7 +252,7 @@ def calc_mortgage_advanced(principal, rate, years, extra_monthly):
         balance -= principal_paid
         total_interest_acc += interest
         months_acc += 1
-        if months_acc > n_months: break # 防止無窮迴圈
+        if months_acc > n_months: break
         
     saved_interest = total_interest_normal - total_interest_acc
     years_saved = (n_months - months_acc) / 12
@@ -312,25 +318,51 @@ def main():
 
     if not st.session_state.get('run', False): return
 
-    with st.spinner("🦅 Alpha 13.4 正在執行真．CFO 財務運算..."):
+    with st.spinner("🦅 Alpha 13.6 正在執行混合全域掃描 (含宏觀動能)..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers_list)
         df_macro, df_fed = fetch_fred_macro(fred_key); adv_data = {t: get_advanced_info(t) for t in tickers_list}
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🦅 戰略戰情", "🐋 深度籌碼", "🔍 個股體檢", "🚦 策略回測", "💰 CFO 財報", "🏠 房貸目標", "📊 策略實驗室"])
 
     with t1:
-        st.title("🦅 Alpha 13.4: 混合戰略指揮中心")
+        st.title("🦅 Alpha 13.6: 混合戰略指揮中心")
         st.subheader("1. 宏觀戰情")
-        liq = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0
-        vix = df_close['^VIX'].iloc[-1] if '^VIX' in df_close.columns else 0
-        tnx = df_close['^TNX'].iloc[-1] if '^TNX' in df_close.columns else 0
-        try: cg = (df_close['HG=F'].iloc[-1]/df_close['GC=F'].iloc[-1])*1000
-        except: cg = 0
+        
+        # 1. Net Liquidity
+        liq_now = df_macro['Net_Liquidity'].iloc[-1] if df_macro is not None else 0
+        liq_prev = df_macro['Net_Liquidity'].iloc[-2] if df_macro is not None and len(df_macro) > 1 else liq_now
+        liq_chg = liq_now - liq_prev
+
+        # 2. VIX
+        vix_now = df_close['^VIX'].iloc[-1] if '^VIX' in df_close.columns else 0
+        vix_prev = df_close['^VIX'].iloc[-2] if '^VIX' in df_close.columns and len(df_close) > 1 else vix_now
+        vix_chg = vix_now - vix_prev
+
+        # 3. 10Y Bond (TNX)
+        tnx_now = df_close['^TNX'].iloc[-1] if '^TNX' in df_close.columns else 0
+        tnx_prev = df_close['^TNX'].iloc[-2] if '^TNX' in df_close.columns and len(df_close) > 1 else tnx_now
+        tnx_chg = tnx_now - tnx_prev
+
+        # 4. Copper/Gold Ratio
+        try: 
+            cg_series = (df_close['HG=F'] / df_close['GC=F']) * 1000
+            cg_now = cg_series.iloc[-1]
+            cg_prev = cg_series.iloc[-2] if len(cg_series) > 1 else cg_now
+            cg_chg = cg_now - cg_prev
+        except: 
+            cg_now = 0; cg_chg = 0
+        
+        # 5. Fed Rate
+        fed_now = df_fed['Fed_Rate'].iloc[-1] if df_fed is not None else 0
+        fed_prev = df_fed['Fed_Rate'].iloc[-2] if df_fed is not None and len(df_fed) > 1 else fed_now
+        fed_chg = fed_now - fed_prev
         
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("💧 淨流動性", f"${liq:.2f}T"); c2.metric("🌪️ VIX", f"{vix:.2f}", delta_color="inverse")
-        c3.metric("⚖️ 10年債", f"{tnx:.2f}%"); c4.metric("🏭 銅金比", f"{cg:.2f}")
-        c5.metric("🏦 Fed利率", f"{df_fed['Fed_Rate'].iloc[-1]:.2f}%" if df_fed is not None else "N/A")
+        c1.metric("💧 淨流動性", f"${liq_now:.2f}T", f"{liq_chg:+.2f}T")
+        c2.metric("🌪️ VIX", f"{vix_now:.2f}", f"{vix_chg:+.2f}", delta_color="inverse")
+        c3.metric("⚖️ 10年債", f"{tnx_now:.2f}%", f"{tnx_chg:+.2f}%", delta_color="inverse")
+        c4.metric("🏭 銅金比", f"{cg_now:.2f}", f"{cg_chg:+.2f}")
+        c5.metric("🏦 Fed利率", f"{fed_now:.2f}%", f"{fed_chg:+.2f}%", delta_color="inverse")
         
         st.markdown("#### 📊 CFO 混合戰略總表 (含 $±2\sigma$ 預測範圍)")
         summary = []
@@ -383,16 +415,18 @@ def main():
                     if obv is not None: fig.add_trace(go.Scatter(y=obv.iloc[-126:], name='OBV', yaxis='y2'))
                     fig.update_layout(height=300, yaxis2=dict(overlaying='y', side='right')); st.plotly_chart(fig, use_container_width=True)
 
-    # === TAB 2: 籌碼 & Kelly ===
+    # === TAB 2: 籌碼 & Kelly (新增主力動向) ===
     with t2:
-        st.subheader("🐋 深度籌碼與凱利倉位")
+        st.subheader("🐋 深度籌碼與主力動向")
         chip_data = []
         for t in tickers_list:
             if t not in df_close.columns: continue
             k_pct = calc_dynamic_kelly(df_close[t])
+            obv_trend = calc_obv_trend(df_close[t], df_vol[t])
             info = adv_data.get(t, {})
             chip_data.append({
                 "代號": t, 
+                "主力動向 (OBV)": obv_trend,
                 "機構持股": f"{(info.get('Inst_Held') or 0)*100:.1f}%", 
                 "空單": f"{(info.get('Short_Ratio') or 0):.2f}",
                 "凱利建議 (Kelly)": f"{k_pct*100:.1f}%"
