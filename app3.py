@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 # 拓撲常數 (Derived from Posa Lab Experiments)
 TOPO_CONSTANTS = {
-    "LIQUIDITY_THRESHOLD": -0.137,  # 最佳防禦閾值 (Trillion USD, 20-day change)
+    "LIQUIDITY_THRESHOLD": -0.2,  # 最佳防禦閾值 (Trillion USD, 20-day change)
     "LAG_DAYS_TECH": 15,            # 科技股反應時滯 (Days)
     "LAG_DAYS_CRYPTO": 0,           # 加密貨幣無時滯 (Immediate Tear)
     "KELLY_LOOKBACK": 60,           # 動態凱利窗口 (對應 Q1 2026 週期)
