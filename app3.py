@@ -32,7 +32,7 @@ ASSET_TAXONOMY = {
 }
 
 st.set_page_config(
-    page_title="Alpha 13.99: 拓撲指揮官 (Ultimate Fixed)",
+    page_title="Alpha 13.999: 拓撲指揮官 (Ultimate)",
     layout="wide",
     page_icon="🦅",
     initial_sidebar_state="expanded"
@@ -51,13 +51,13 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
     /* 狀態標籤 */
-    .bull-tag {
+    .bull-mode {
         color: #00FF7F; font-weight: bold; border: 1px solid #00FF7F; 
-        padding: 2px 8px; border-radius: 4px; font-size: 0.8em;
+        padding: 2px 8px; border-radius: 4px; font-size: 0.9em;
     }
-    .bear-tag {
+    .bear-mode {
         color: #FF4B4B; font-weight: bold; border: 1px solid #FF4B4B; 
-        padding: 2px 8px; border-radius: 4px; font-size: 0.8em;
+        padding: 2px 8px; border-radius: 4px; font-size: 0.9em;
     }
     .defensive-tag {
         color: #FFD700; font-weight: bold; border: 1px solid #FFD700; 
@@ -70,6 +70,18 @@ st.markdown("""
     }
     .stTabs [aria-selected="true"] {
         background-color: #00BFFF; color: #000; font-weight: bold;
+    }
+    /* 表格優化 */
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    th {
+        background-color: #262730;
+        color: white;
+    }
+    td {
+        border-bottom: 1px solid #444;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -180,12 +192,13 @@ def train_rf_model(df_close, ticker, days_forecast=30):
         df = pd.DataFrame({'Close': df_close[ticker]})
         df['Ret'] = df['Close'].pct_change()
         df['Vol'] = df['Ret'].rolling(20).std()
+        df['SMA'] = df['Close'].rolling(20).mean() # Feature Engineering
         df['Target'] = df['Close'].shift(-days_forecast) # 預測未來
         df = df.dropna()
         
         if len(df) < 60: return None
         
-        X = df[['Ret', 'Vol']]
+        X = df.drop(columns=['Target', 'Close'])
         y = df['Target']
         
         model = RandomForestRegressor(n_estimators=TOPO_CONSTANTS['RF_TREES'], max_depth=5, random_state=42)
@@ -302,10 +315,10 @@ def calc_dynamic_kelly(series, lookback=60):
 def analyze_trend_multi(series):
     """ 多重趨勢狀態判定 """
     if len(series) < 200: return {"status": "N/A", "p_now": series.iloc[-1], "is_bull": False}
-    p = series.iloc[-1]; ma200 = series.rolling(200).mean().iloc[-1]
-    ma200_prev = series.rolling(200).mean().iloc[-10]
-    is_bull = (p > ma200) and (ma200 > ma200_prev)
-    return {"status": "🔥 多頭" if p > ma200 else "🛑 空頭", "p_now": p, "is_bull": is_bull}
+    p = series.iloc[-1]; sma200 = series.rolling(200).mean().iloc[-1]
+    sma200_prev = series.rolling(200).mean().iloc[-10]
+    is_bull = (p > sma200) and (sma200 > sma200_prev)
+    return {"status": "🔥 多頭" if p > sma200 else "🛑 空頭", "p_now": p, "is_bull": is_bull}
 
 def calc_tech_indicators(series, vol_series):
     """ RSI, Slope, Volume Ratio """
@@ -334,7 +347,7 @@ def calc_six_dim_state(series):
     if p < ma20 - 2*std: return "L2 超賣區"
     return "L1 震盪整理"
 
-# [CRITICAL FIX] 補回 calc_mvrv_z 函數
+# [RESTORED] 補回 calc_mvrv_z 函數
 def calc_mvrv_z(series):
     """
     MVRV-Z Score 近似值 (用於判斷是否偏離均值過遠)。
@@ -364,7 +377,7 @@ def get_cfo_directive_v4(p_now, six_state, trend_status, bull_mode, rsi, slope, 
         
     return (" | ".join(buy_signals) if buy_signals else ("🦁 牛市持倉" if bull_mode else "⬜ 觀望/持有")), build_pct
 
-# [CRITICAL FIX] 補回 calc_obv_trend 函數
+# [RESTORED] 補回 calc_obv_trend 函數
 def calc_obv_trend(close, volume, lookback=20):
     try:
         obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
@@ -373,12 +386,12 @@ def calc_obv_trend(close, volume, lookback=20):
         return "🔥 吸籌" if delta > 0 else "🔻 出貨"
     except: return "N/A"
 
-# [CRITICAL FIX] 補回 calc_obv 函數
+# [RESTORED] 補回 calc_obv 函數
 def calc_obv(close, volume):
     if volume is None: return None
     return (np.sign(close.diff()) * volume).fillna(0).cumsum()
 
-# [CRITICAL FIX] 補回 compare_with_leverage 函數
+# [RESTORED] 補回 compare_with_leverage 函數
 def compare_with_leverage(ticker, df_close):
     if ticker not in df_close.columns: return None
     benchs = ['QQQ', 'QLD', 'TQQQ']
@@ -591,7 +604,7 @@ def main():
         return
 
     # --- Data Fetching ---
-    with st.spinner("🦅 Alpha 13.99 正在執行全域拓撲掃描..."):
+    with st.spinner("🦅 Alpha 13.999 正在執行全域拓撲掃描..."):
         df_close, df_high, df_low, df_vol = fetch_market_data(tickers)
         df_macro, df_fed = fetch_fred_macro(fred_key)
         adv_data = {t: get_advanced_info(t) for t in tickers}
@@ -604,9 +617,9 @@ def main():
     
     t1, t2, t3, t4, t5, t6, t7, t8 = tabs
 
-    # === TAB 1: 宏觀戰情 ===
+    # === TAB 1: 宏觀戰情 (RESTORED TABLE) ===
     with t1:
-        st.title("🦅 Alpha 13.99: 混合戰略指揮中心")
+        st.title("🦅 Alpha 13.999: 混合戰略指揮中心")
         
         # 1. Macro Dashboard
         if df_macro is not None:
@@ -616,7 +629,7 @@ def main():
             
             # 狀態判定
             is_crunch = liq_chg < TOPO_CONSTANTS['LIQUIDITY_THRESHOLD']
-            status_html = f'<span class="bear-tag">拓撲撕裂 (HARD DEFENSE)</span>' if is_crunch else f'<span class="bull-tag">流動性安全</span>'
+            status_html = f'<span class="bear-mode">拓撲撕裂 (HARD DEFENSE)</span>' if is_crunch else f'<span class="bull-mode">流動性安全</span>'
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("💧 淨流動性", f"${liq:.2f}T", f"{liq_chg:+.3f}T (20d)")
@@ -633,8 +646,8 @@ def main():
         k1.metric("🌪️ VIX", f"{vix:.2f}")
         k2.metric("🏦 Fed利率", f"{fed:.2f}%")
 
-        # 2. Strategy Table
-        st.markdown("#### 📊 CFO 混合戰略總表")
+        # 2. Strategy Table (RESTORED HTML VERSION)
+        st.markdown("#### 📊 CFO 混合戰略總表 (含 $±2\sigma$ 預測範圍)")
         summary = []
         for t in tickers:
             if t not in df_close.columns: continue
@@ -654,20 +667,32 @@ def main():
             targets = calc_targets_composite(t, df_close, df_high, df_low, adv_data.get(t,{}), 30)
             tgt_val = targets['Avg'] if targets else 0
             
+            # Calculate Range
+            try:
+                vol_22 = df_close[t].pct_change().std() * np.sqrt(22)
+                pred_range = f"${tr['p_now']*(1-2*vol_22):.2f} - ${tr['p_now']*(1+2*vol_22):.2f}"
+            except: pred_range = "N/A"
+            
             # V2 Radar (Injected Threshold)
             bt = run_backtest_lab_v2(t, df_close, df_high, df_low, df_macro, adv_data.get(t,{}), 30)
             
             # CFO Directive
             act, _ = get_cfo_directive_v4(tr['p_now'], six, tr['status'], tr['is_bull'], rsi, slope, vr, mvrv, tgt_val*1.05, tgt_val*0.95)
             
+            mode_tag = f'<span class="bull-mode">BULL</span>' if tr['is_bull'] else f'<span class="bear-mode">BEAR</span>'
+            
             summary.append({
                 "代號": t, 
+                "模式": mode_tag,
                 "現價": f"${tr['p_now']:.2f}",
-                "CFO指令": act,
-                "目標價": f"${tgt_val:.2f}",
+                "CFO 指令": act,
+                "預期範圍(±2σ)": pred_range,
+                "目標價(Avg)": f"${tgt_val:.2f}",
                 "拓撲回測誤差": f"{bt['Error']:.1%}" if bt else "N/A"
             })
-        st.dataframe(pd.DataFrame(summary))
+        
+        # 使用 HTML 渲染多彩表格
+        st.write(pd.DataFrame(summary).to_html(escape=False), unsafe_allow_html=True)
         
         # 顯示詳細回測文字
         with st.expander("🦅 點擊查看詳細回測修正邏輯"):
