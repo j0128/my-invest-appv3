@@ -117,7 +117,7 @@ def calc_targets_composite(ticker, df_close, df_high, df_low, f_data, days_forec
     except Exception: return None
 
         # 3. 綜合平均 (移除 PE Target)
-        targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf, t_dcf] if t is not None and not pd.isna(t)]
+        targets = [t for t in [t_atr, t_mc, t_fib, f_data.get('Target_Mean'), t_rf] if t is not None and not pd.isna(t)]
         t_avg = sum(targets) / len(targets) if targets else None
         
         return {"Avg": t_avg, "ATR": t_atr, "MC": t_mc, "Fib": t_fib, "RF": t_rf, "DCF": t_dcf}
